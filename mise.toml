@@ -23,7 +23,10 @@ run = "cargo test"
 
 [tasks."openspec:open"]
 description = "Render an OpenSpec proposal to HTML and open it in the browser"
-usage = 'arg "<change-id>" help="OpenSpec change ID to preview (e.g. my-feature)"'
+usage = '''
+arg "<change-id>" help="OpenSpec change ID to preview (e.g. my-feature)"
+complete "change-id" run="openspec list --json | jq -r '.changes[].name'"
+'''
 run = "scripts/view-proposal.sh ${usage_change_id?}"
 
 [tools]
