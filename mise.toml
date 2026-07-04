@@ -1,0 +1,29 @@
+[hooks]
+enter = "lefthook install"
+
+[tasks.build]
+description = "Build the cargo project"
+run = "cargo build"
+sources = ["Cargo.toml", "src/**/*.rs"]
+outputs = ["target/debug/bs"]
+
+[tasks."build:release"]
+description = "Build the cargo project in release mode"
+run = "cargo build --release"
+sources = ["Cargo.toml", "src/**/*.rs"]
+outputs = ["target/release/bs"]
+
+[tasks.run]
+description = "Run the cargo project"
+run = "cargo run"
+
+[tasks.test]
+description = "Run the cargo test suite"
+run = "cargo test"
+
+[tools]
+lefthook = "latest"
+"npm:@colbymchenry/codegraph" = "latest"
+"npm:@fission-ai/openspec" = "latest"
+prettier = "latest"
+rust = "1.96.0"

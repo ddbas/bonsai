@@ -1,0 +1,24 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format
+      group:
+        parallel: true
+        jobs:
+          - name: rust
+            glob: "*.rs"
+            run: cargo fmt
+            stage_fixed: true
+          - name: markdown
+            glob: "*.md"
+            run: mise exec -- prettier --write {staged_files}
+            stage_fixed: true
+    - name: lint
+      glob: "*.rs"
+      run: cargo clippy -- -D warnings
+      stage_fixed: true
+    - name: test
+      run: cargo test
+    - name: openspec-validate
+      glob: "openspec/**"
+      run: bash scripts/openspec-validate-staged.sh {staged_files}
