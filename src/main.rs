@@ -6,7 +6,7 @@ use bonsai::worktree;
 #[derive(Parser)]
 #[command(
     name = "bs",
-    about = "bonsai – project tooling",
+    about = "🌳 bonsai – instantly provision clean git worktrees so you can context-switch without trashing your working tree.",
     long_about = None,
     // Disable built-in `help` subcommand so we can define our own.
     disable_help_subcommand = true,
