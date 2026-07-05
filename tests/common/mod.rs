@@ -144,6 +144,20 @@ impl GitEnv {
 
         // Initialise the repository inside the container (clean environment:
         // no host gitconfig, no host hooks, no GIT_* env vars).
+        //
+        // On CI, the bind-mounted workspace is owned by the host runner user
+        // (uid 1001) while the container runs as root (uid 0).  Git 2.35.2+
+        // refuses to operate in directories owned by a different user unless
+        // the path is listed in safe.directory.  Set this globally BEFORE
+        // `git init` so every subsequent git command trusts /workspace.
+        env.git(&[
+            "config",
+            "--global",
+            "--add",
+            "safe.directory",
+            "/workspace",
+        ])
+        .await;
         env.git(&["init"]).await;
         env.git(&["config", "user.email", "test@example.com"]).await;
         env.git(&["config", "user.name", "Test"]).await;
@@ -154,6 +168,15 @@ impl GitEnv {
         std::fs::write(env.repo_path.join("README.md"), "# test").expect("write README.md");
         env.git(&["add", "."]).await;
         env.git(&["commit", "-m", "init"]).await;
+
+        // Fix permissions so the host runner user can write into the workspace.
+        // On Linux the container runs as root (uid 0) and every file git
+        // creates in the bind-mounted temp dir is owned by root on the host
+        // filesystem.  The host `bs` binary runs as a non-root user (e.g.
+        // uid 1001 on GitHub Actions) and would get EACCES when trying to
+        // create `.git/worktrees/*`.  On macOS, Docker Desktop's VM maps UIDs
+        // transparently so this is a no-op in practice there.
+        env.fix_permissions().await;
 
         env
     }
@@ -211,6 +234,7 @@ impl GitEnv {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
         cmd.current_dir(&self.repo_path)
             .env("BONSAI_ROOT", &self.bonsai_path);
+        Self::apply_safe_directory(&mut cmd);
         cmd
     }
 
@@ -219,7 +243,25 @@ impl GitEnv {
     pub fn bs_from(&self, dir: &Path) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
         cmd.current_dir(dir).env("BONSAI_ROOT", &self.bonsai_path);
+        Self::apply_safe_directory(&mut cmd);
         cmd
+    }
+
+    /// Inject `safe.directory=*` via Git's `GIT_CONFIG_*` environment
+    /// variables so that git sub-processes spawned by `bs` trust the
+    /// test repo regardless of file ownership.
+    ///
+    /// On macOS Docker Desktop maps UIDs transparently, so this is a no-op
+    /// in practice there.  On Linux CI the container runs as root (uid 0)
+    /// and the files it creates in the bind-mounted temp dir are owned by
+    /// root on the host filesystem.  Git 2.35.2+ refuses to operate on a
+    /// repository whose `.git/` is owned by a different user unless the
+    /// path is listed in `safe.directory`.  Setting `*` here is safe
+    /// because these commands only ever run inside the isolated test env.
+    fn apply_safe_directory(cmd: &mut Command) {
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "safe.directory")
+            .env("GIT_CONFIG_VALUE_0", "*");
     }
 
     /// Run `bs get`, assert success, and return the slot path parsed from
@@ -235,6 +277,23 @@ impl GitEnv {
         path_from_output(&out.stdout)
     }
 
+    /// Make `/workspace` world-accessible so the host runner user (non-root
+    /// on Linux CI) can write into directories created by root inside the
+    /// container (e.g. `.git/worktrees/`).
+    async fn fix_permissions(&self) {
+        let chmod = ExecCommand::new(vec![
+            "chmod".to_string(),
+            "-R".to_string(),
+            "a+rwX".to_string(),
+            "/workspace".to_string(),
+        ])
+        .with_cmd_ready_condition(testcontainers::core::CmdWaitFor::exit_code(0));
+        self._container
+            .exec(chmod)
+            .await
+            .expect("chmod -R a+rwX /workspace failed — is the container still running?");
+    }
+
     /// HEAD SHA of the test repository.
     pub fn head_sha(&self) -> String {
         worktree_head(&self.repo_path)
@@ -247,6 +306,9 @@ impl GitEnv {
         self.git(&["add", "."]).await;
         self.git(&["commit", "-m", &format!("add {filename}")])
             .await;
+        // Re-apply world-writable permissions after each commit so the host
+        // runner user can access newly created .git objects and refs.
+        self.fix_permissions().await;
     }
 
     /// The single repo-slug directory created under `bonsai_path` after the
