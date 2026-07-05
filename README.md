@@ -1,4 +1,40 @@
+<div align="center">
+
 # 🌳 Bonsai
+
+<h3 align="center">Instant, clean git worktrees on demand.</h3>
+
+Bonsai manages a pool of git worktrees so you can jump between tasks without
+ever stashing, committing half-finished work, or waiting for a fresh clone. Run
+`bs` and you get a clean slot at the current HEAD — ready to use, already on
+disk. When you're done, put it back in the pool; the next call reuses it in
+milliseconds.
+
+</div>
+
+## Quick Start
+
+```bash
+# Get a clean worktree for the current HEAD (creates one if the pool is empty)
+bs get
+
+# List every slot in the pool with its availability status
+bs list
+
+# Re-print this help
+bs help
+```
+
+`bs get` prints the absolute path to the worktree, making it easy to `cd` into
+it:
+
+```bash
+cd $(bs get)
+```
+
+## Install
+
+> **TBD** — installation instructions coming soon.
 
 ## Prerequisites
 
@@ -11,31 +47,23 @@ The following tools must be available on `PATH` at runtime:
 
 ## Running Tests
 
-### Unit tests
-
 ```bash
-mise run test          # runs cargo test (unit + integration)
+mise run test          # run everything (unit + integration + E2E)
 ```
-
-### E2E / Integration tests
 
 E2E tests use [testcontainers](https://crates.io/crates/testcontainers) to spin
-up ephemeral Docker containers per test. They run automatically as part of
-`mise run test` — no separate task needed.
-
-**Requirements:** Docker must be running. The first run pulls images; subsequent
-runs use Docker's local cache and are fast.
+up ephemeral Docker containers per test. **Docker must be running.** The first
+run pulls images; subsequent runs use Docker's local cache and are fast.
 
 ```bash
-mise run test                        # run everything (unit + integration + E2E)
-cargo test --test e2e_example        # run only the bootstrap E2E test
-cargo test --test help_command       # run only the CLI help-command tests
+cargo test --test e2e_example    # run only the bootstrap E2E test
+cargo test --test help_command   # run only the CLI help-command tests
 ```
 
-### Adding new container-backed tests
+### Adding container-backed tests
 
 1. Create `tests/<name>.rs` and declare `mod common;` at the top.
-2. Call `common::start_generic_container()` (or add a new helper to
+2. Call `common::start_generic_container()` (or add a helper to
    `tests/common/mod.rs`) to get a container handle.
 3. Annotate each async test with `#[tokio::test]`.
 4. Let the container handle drop naturally — testcontainers removes it.
