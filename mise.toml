@@ -13,7 +13,7 @@ run = "rtk cargo build --release"
 sources = ["Cargo.toml", "src/**/*.rs"]
 outputs = ["target/release/bs"]
 
-[tasks.run]
+[tasks.dev]
 description = "Run the cargo project"
 run = "cargo run"
 
