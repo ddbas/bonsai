@@ -19,8 +19,8 @@ is no table formatter.
 - Extend `list_worktrees_status` to return an `Option<usize>` process count
   alongside each `(PathBuf, WorktreeStatus)`.
 - Render the count as a right-aligned column in `bs list`; leave it blank for
-  `Available` slots and for `InUse` slots whose count is 0 (dirty/locked, not
-  open files).
+  `Available` slots and for `InUse` slots with no open file handles (locked or
+  dirty-but-idle). A dirty slot that also has open file handles shows the count.
 
 **Non-Goals:**
 
@@ -52,20 +52,22 @@ Alternatives considered:
 
 ### Decision: `list_worktrees_status` return type changes to `Vec<(PathBuf, WorktreeStatus, Option<usize>)>`
 
-`Option<usize>` is `Some(n)` when `n > 0` open processes were detected, and
-`None` in every other case (available, dirty, locked, lsof error-propagated).
-This keeps the rendering layer simple: render the column only when the value is
-`Some`.
+`Option<usize>` is `Some(n)` when `n > 0` open processes were detected
+(regardless of whether the working tree is also dirty), and `None` in every
+other case (available, locked, or lsof error-propagated). A dirty slot with open
+file handles is `Some(n)` — the process count is the primary signal. This keeps
+the rendering layer simple: render the column only when the value is `Some`.
 
 Alternative: a richer `SlotInfo` struct. Deferred — three-tuple is fine until
 more fields are needed.
 
 ### Decision: Column is blank (not "0") for slots with no open processes
 
-Showing "0" for a locked or dirty slot would be misleading — it implies the
-open-file check ran and found nothing, when in fact we never ran it. Blank is
-unambiguous. `Some(0)` cannot occur by construction (we set `None` for the
-non-open-file InUse cases), but even if it did, we'd still render blank.
+Showing "0" for a locked or dirty (but idle) slot would be misleading — it
+implies the open-file check ran and found nothing, when in fact no processes are
+holding the slot. Blank is unambiguous. `Some(0)` cannot occur by construction
+(we set `None` whenever the count is zero), but even if it did, we'd still
+render blank.
 
 ### Decision: Simple fixed-width padding, no table-layout crate
 

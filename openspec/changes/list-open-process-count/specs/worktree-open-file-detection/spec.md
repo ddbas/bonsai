@@ -33,9 +33,12 @@ when `lsof` exits with no matches (exit code 1, empty stdout).
 
 `list_worktrees_status` SHALL return
 `Vec<(PathBuf, WorktreeStatus, Option<usize>)>`. The third element SHALL be
-`Some(n)` where `n > 0` when the slot is `InUse` due to open file handles, and
-`None` in all other cases (available, locked, dirty, or when `lsof` returns an
-error that is propagated).
+`Some(n)` where `n > 0` when `count_open_processes` returns a positive count for
+that slot (regardless of whether the working tree is also dirty), and `None` in
+all other cases (available, locked, dirty-with-no-open-handles, or when `lsof`
+returns an error that is propagated). The dirty flag SHALL NOT suppress the
+process count — a slot that is both dirty and has open file handles SHALL expose
+`Some(n)`.
 
 #### Scenario: Available slot has `None` count
 
@@ -47,8 +50,19 @@ error that is propagated).
 - **WHEN** a slot is `WorktreeStatus::InUse` because it is git-locked
 - **THEN** the process-count element SHALL be `None`
 
-#### Scenario: Open-file slot has `Some(n)` count
+#### Scenario: Dirty slot with no open handles has `None` count
+
+- **WHEN** a slot has uncommitted changes AND `count_open_processes` returns `0`
+- **THEN** the process-count element SHALL be `None`
+
+#### Scenario: Dirty slot with open handles has `Some(n)` count
+
+- **WHEN** a slot has uncommitted changes AND `count_open_processes` returns
+  `n > 0`
+- **THEN** the process-count element SHALL be `Some(n)`
+
+#### Scenario: Clean open-file slot has `Some(n)` count
 
 - **WHEN** a slot is `WorktreeStatus::InUse` because `count_open_processes`
-  returned `n > 0`
+  returned `n > 0` and the working tree is clean
 - **THEN** the process-count element SHALL be `Some(n)`

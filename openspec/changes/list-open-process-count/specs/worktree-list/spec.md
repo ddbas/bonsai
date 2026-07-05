@@ -17,7 +17,8 @@ file handles inside it; otherwise the column SHALL be blank.
 
 #### Scenario: Single in-use worktree with no open file handles
 
-- **WHEN** the pool contains one slot that is locked or has uncommitted changes
+- **WHEN** the pool contains one slot that is locked, or has uncommitted changes
+  but no open file handles
 - **THEN** stdout SHALL contain one line with a red `in use` badge, the
   tilde-prefixed path, and a blank process-count column
 
@@ -28,6 +29,14 @@ file handles inside it; otherwise the column SHALL be blank.
 - **WHEN** exactly N distinct processes hold open file handles in that slot
 - **THEN** stdout SHALL contain one line with a red `in use` badge, the
   tilde-prefixed path, and the number N in the process-count column
+
+#### Scenario: Dirty worktree with open file handles shows process count
+
+- **WHEN** the pool contains one slot that has both uncommitted changes AND open
+  file handles from N distinct processes
+- **THEN** stdout SHALL contain one line with a red `in use` badge, the
+  tilde-prefixed path, and the number N in the process-count column
+- **NOTE** The presence of uncommitted changes SHALL NOT suppress the count
 
 #### Scenario: Process count column is blank for available slots
 
