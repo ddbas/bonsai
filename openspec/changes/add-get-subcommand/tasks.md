@@ -72,17 +72,46 @@
 - [ ] 6.4 Add a specific error for bare repo detection (`git_common_dir()`
       returns `.`)
 
-## 7. Tests
+## 7. Unit Tests
 
-- [ ] 7.1 Unit test `repo_slug()` called from a path that simulates a linked
-      worktree (verify it returns the main repo's name, not the slot name)
-- [ ] 7.2 Unit test `new_slot_path()` output matches
-      `<pool_dir>/<8-char-alphanumeric>/`
-- [ ] 7.3 Unit test `find_available_slot()` returns `None` when all slots are
-      dirty or locked
-- [ ] 7.4 Unit test `find_available_slot()` returns the first clean, unlocked
-      slot path
-- [ ] 7.5 Integration / smoke test: `bs get` creates a slot under
-      `~/.bonsai/<repo-slug>/`, prints path, exits 0; second call reuses it
-- [ ] 7.6 Integration / smoke test: `bs` (no subcommand) behaves identically to
-      `bs get`
+- [ ] 7.1 `repo_slug()`: returns the main repo's basename when called from a
+      path inside a linked worktree (not the slot directory name)
+- [ ] 7.2 `repo_slug()`: lowercases the name and replaces non-alphanumeric
+      characters with `-`
+- [ ] 7.3 `new_slot_path()`: returned path is `<pool_dir>/<8-char-hex>/` and two
+      successive calls produce different names
+- [ ] 7.4 `find_available_slot()`: returns `None` when every pool slot is dirty
+- [ ] 7.5 `find_available_slot()`: returns `None` when every pool slot is locked
+- [ ] 7.6 `find_available_slot()`: returns the path of the first clean, unlocked
+      slot when one exists alongside dirty/locked ones
+- [ ] 7.7 `find_available_slot()`: returns `None` when the pool directory is
+      empty
+
+## 8. Integration Tests
+
+- [ ] 8.1 **Pool dirs created on first run**: run `bs get` against a temp root
+      with no existing `~/.bonsai`-equivalent; assert both the root and
+      `<repo-slug>/` subdirectory are created and the command exits 0
+- [ ] 8.2 **Pool dirs idempotent**: run `bs get` twice; assert no error on the
+      second call when the directories already exist
+- [ ] 8.3 **New slot created**: run `bs get` on an empty pool; assert a
+      UUID-named subdirectory is created, it is a registered git worktree, it is
+      in detached HEAD state, and its path is printed to stdout
+- [ ] 8.4 **Existing clean slot reused**: run `bs get` twice on an empty pool;
+      assert both calls return the same path and only one worktree slot exists
+- [ ] 8.5 **Slot reset to current HEAD**: advance HEAD by one commit; run
+      `bs get`; assert the reused slot's HEAD matches the new commit SHA
+- [ ] 8.6 **Dirty slot skipped, new slot created**: make an uncommitted change
+      inside an existing slot; run `bs get`; assert a second UUID slot is
+      created and returned instead of the dirty one
+- [ ] 8.7 **Locked slot skipped, new slot created**: lock an existing slot with
+      `git worktree lock`; run `bs get`; assert a new slot is created and
+      returned
+- [ ] 8.8 **Stale registration pruned**: register a worktree then manually
+      delete its directory; run `bs get`; assert `git worktree prune` cleans up
+      the stale entry and a fresh slot is created successfully
+- [ ] 8.9 **Called from a linked worktree**: `cd` into an existing managed slot
+      before running `bs get`; assert the repo slug is derived from the main
+      repo (not the slot directory) and a valid slot path is returned
+- [ ] 8.10 **Default command**: run `bs` with no subcommand; assert output and
+      exit code are identical to `bs get`
