@@ -1,5 +1,19 @@
 # 🌳 Bonsai
 
+## Prerequisites
+
+The following tools must be available on `PATH` at runtime:
+
+| Tool   | Purpose                                           | Install (macOS)     |
+| ------ | ------------------------------------------------- | ------------------- |
+| `git`  | Worktree management                               | pre-installed       |
+| `lsof` | Detect open file handles in pool slot directories | `brew install lsof` |
+
+> **Note:** `lsof` ships by default on macOS (usually at `/usr/sbin/lsof`). On
+> Debian/Ubuntu Linux, install it with `apt install lsof`. If `lsof` is not on
+> `PATH`, `bs get` and `bs list` will exit with a non-zero status and an
+> actionable error message.
+
 ## Running Tests
 
 ### Unit tests

@@ -75,15 +75,16 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            for (path, status) in &entries {
+            for (path, status, process_count) in &entries {
                 let tilde = worktree::tilde_path(path);
                 match status {
                     worktree::WorktreeStatus::Available => {
                         println!("{}  {}", "available".green(), tilde);
                     }
-                    worktree::WorktreeStatus::InUse => {
-                        println!("{}     {}", "in use".red(), tilde);
-                    }
+                    worktree::WorktreeStatus::InUse => match process_count {
+                        Some(n) => println!("{}     {}  {:>4} processes", "in use".red(), tilde, n),
+                        None => println!("{}     {}", "in use".red(), tilde),
+                    },
                 }
             }
         }
