@@ -12,7 +12,7 @@ milliseconds.
 
 </div>
 
-## Quick Start
+## 🚀 Quick Start
 
 ```
 $ bs get
