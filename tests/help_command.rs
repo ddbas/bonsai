@@ -1,27 +1,24 @@
-/// Integration tests for the `bs help` command.
-///
-/// These tests exercise the real binary via `std::process::Command`.
-/// Tests that require an isolated git environment use [`common::GitEnv`].
+//! Integration tests for the `bs help` command.
+//!
+//! All tests run the binary inside a [`common::GitEnv`] Docker container
+//! environment so the host machine's git configuration, filesystem, and
+//! home directory are never touched — even if a future `bs help`
+//! implementation starts shelling out to git.
 mod common;
 
-use std::process::Command;
+// ── bs help ──────────────────────────────────────────────────────────────────
 
-/// Path to the compiled `bs` binary, resolved at compile time by Cargo.
-fn bs() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bs"))
-}
-
-// ── bs help ─────────────────────────────────────────────────────────────────
-
-#[test]
-fn help_subcommand_exits_zero() {
-    let status = bs().arg("help").status().expect("failed to spawn bs");
+#[tokio::test]
+async fn help_subcommand_exits_zero() {
+    let env = common::GitEnv::new().await;
+    let status = env.bs().arg("help").status().expect("failed to spawn bs");
     assert!(status.success(), "`bs help` should exit 0, got {status}");
 }
 
-#[test]
-fn help_subcommand_prints_program_name() {
-    let output = bs().arg("help").output().expect("failed to spawn bs");
+#[tokio::test]
+async fn help_subcommand_prints_program_name() {
+    let env = common::GitEnv::new().await;
+    let output = env.bs().arg("help").output().expect("failed to spawn bs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("bs"),
@@ -29,9 +26,10 @@ fn help_subcommand_prints_program_name() {
     );
 }
 
-#[test]
-fn help_subcommand_prints_about_text() {
-    let output = bs().arg("help").output().expect("failed to spawn bs");
+#[tokio::test]
+async fn help_subcommand_prints_about_text() {
+    let env = common::GitEnv::new().await;
+    let output = env.bs().arg("help").output().expect("failed to spawn bs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("bonsai"),
@@ -39,9 +37,10 @@ fn help_subcommand_prints_about_text() {
     );
 }
 
-#[test]
-fn help_subcommand_lists_help_subcommand() {
-    let output = bs().arg("help").output().expect("failed to spawn bs");
+#[tokio::test]
+async fn help_subcommand_lists_help_subcommand() {
+    let env = common::GitEnv::new().await;
+    let output = env.bs().arg("help").output().expect("failed to spawn bs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("help"),
@@ -49,17 +48,19 @@ fn help_subcommand_lists_help_subcommand() {
     );
 }
 
-// ── bs --help ────────────────────────────────────────────────────────────────
+// ── bs --help ─────────────────────────────────────────────────────────────────
 
-#[test]
-fn flag_help_exits_zero() {
-    let status = bs().arg("--help").status().expect("failed to spawn bs");
+#[tokio::test]
+async fn flag_help_exits_zero() {
+    let env = common::GitEnv::new().await;
+    let status = env.bs().arg("--help").status().expect("failed to spawn bs");
     assert!(status.success(), "`bs --help` should exit 0, got {status}");
 }
 
-#[test]
-fn flag_help_prints_usage() {
-    let output = bs().arg("--help").output().expect("failed to spawn bs");
+#[tokio::test]
+async fn flag_help_prints_usage() {
+    let env = common::GitEnv::new().await;
+    let output = env.bs().arg("--help").output().expect("failed to spawn bs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.to_lowercase().contains("usage"),
@@ -67,10 +68,7 @@ fn flag_help_prints_usage() {
     );
 }
 
-// ── bs (no args) ─────────────────────────────────────────────────────────────
-// `bs` with no arguments defaults to `bs get`.  These tests use `GitEnv` to
-// provide a fully isolated git repo + BONSAI_ROOT (Docker container) so the
-// host machine is never touched, even when the tests run inside a git hook.
+// ── bs (no args) ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn no_args_exits_zero() {
