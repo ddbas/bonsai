@@ -144,6 +144,20 @@ impl GitEnv {
 
         // Initialise the repository inside the container (clean environment:
         // no host gitconfig, no host hooks, no GIT_* env vars).
+        //
+        // On CI, the bind-mounted workspace is owned by the host runner user
+        // (uid 1001) while the container runs as root (uid 0).  Git 2.35.2+
+        // refuses to operate in directories owned by a different user unless
+        // the path is listed in safe.directory.  Set this globally BEFORE
+        // `git init` so every subsequent git command trusts /workspace.
+        env.git(&[
+            "config",
+            "--global",
+            "--add",
+            "safe.directory",
+            "/workspace",
+        ])
+        .await;
         env.git(&["init"]).await;
         env.git(&["config", "user.email", "test@example.com"]).await;
         env.git(&["config", "user.name", "Test"]).await;
