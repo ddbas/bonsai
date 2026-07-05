@@ -12,6 +12,8 @@ mise run run             # Run the project
 mise run test            # Run the test suite
 ```
 
+All new features MUST include unit and/or integration tests.
+
 Available tasks are defined in `mise.toml`. To list them:
 
 ```bash
