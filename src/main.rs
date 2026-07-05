@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand};
+use owo_colors::OwoColorize as _;
 
 use bonsai::worktree;
 
@@ -27,6 +28,13 @@ enum Commands {
     /// is equivalent to `bs get`.
     Get,
 
+    /// List all managed worktrees in the pool with their availability status.
+    ///
+    /// Displays one line per slot: a coloured status badge followed by the
+    /// tilde-abbreviated path.  Green = available; red = in use.
+    #[command(alias = "ls")]
+    List,
+
     /// Show usage information.
     Help,
 }
@@ -46,6 +54,38 @@ fn run() -> anyhow::Result<()> {
         None | Some(Commands::Get) => {
             let path = worktree::get_worktree()?;
             println!("🌳 {}", path.display());
+        }
+
+        Some(Commands::List) => {
+            let root = worktree::managed_root()?;
+            let slug = worktree::repo_slug()?;
+            let pool_dir = root.join(&slug);
+
+            if !pool_dir.exists() {
+                println!("No worktrees managed for this repository (pool does not exist yet).");
+                println!("Run `bs get` to create the first slot.");
+                return Ok(());
+            }
+
+            let entries = worktree::list_worktrees_status(&pool_dir)?;
+
+            if entries.is_empty() {
+                println!("No worktrees managed for this repository.");
+                println!("Run `bs get` to create the first slot.");
+                return Ok(());
+            }
+
+            for (path, status) in &entries {
+                let tilde = worktree::tilde_path(path);
+                match status {
+                    worktree::WorktreeStatus::Available => {
+                        println!("{}  {}", "available".green(), tilde);
+                    }
+                    worktree::WorktreeStatus::InUse => {
+                        println!("{}     {}", "in use".red(), tilde);
+                    }
+                }
+            }
         }
 
         Some(Commands::Help) => {

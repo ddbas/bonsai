@@ -66,6 +66,15 @@ pub struct WorktreeEntry {
     pub locked: bool,
 }
 
+/// Availability status of a pool worktree slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeStatus {
+    /// Slot exists on disk, is not locked, and its working tree is clean.
+    Available,
+    /// Slot is locked or has uncommitted changes.
+    InUse,
+}
+
 // -- Core utilities (section 2) -----------------------------------------------
 
 /// Run `git rev-parse --git-common-dir` and return the path.
@@ -163,6 +172,21 @@ pub fn new_slot_path(pool_dir: &Path) -> PathBuf {
     pool_dir.join(prefix)
 }
 
+// -- Path helpers -------------------------------------------------------------
+
+/// Replace the home directory prefix in `path` with `~`.
+///
+/// If `path` does not start with the home directory, the full absolute path is
+/// returned unchanged.
+pub fn tilde_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(stripped) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", stripped.display());
+    }
+    path.display().to_string()
+}
+
 // -- Pool scan (section 3) ----------------------------------------------------
 
 /// Parse `git worktree list --porcelain` and return entries whose path falls
@@ -220,6 +244,28 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
     }
 
     Ok(entries)
+}
+
+/// Return the availability status of every pool worktree slot.
+///
+/// Each slot is classified as [`WorktreeStatus::Available`] when it exists on
+/// disk, is not locked, and its working tree is clean; otherwise it is
+/// [`WorktreeStatus::InUse`].
+pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<(PathBuf, WorktreeStatus)>> {
+    let entries = list_pool_worktrees(pool_dir)?;
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let status = if entry.locked || !entry.path.exists() {
+            WorktreeStatus::InUse
+        } else {
+            match is_clean(&entry.path) {
+                Ok(true) => WorktreeStatus::Available,
+                _ => WorktreeStatus::InUse,
+            }
+        };
+        result.push((entry.path, status));
+    }
+    Ok(result)
 }
 
 /// Return `true` if the working tree at `slot_path` has no uncommitted
@@ -371,6 +417,80 @@ pub fn get_worktree() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // -- tilde_path -----------------------------------------------------------
+
+    #[test]
+    fn tilde_path_replaces_home_prefix() {
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join("some").join("dir");
+            let result = tilde_path(&path);
+            assert_eq!(result, "~/some/dir");
+        }
+    }
+
+    #[test]
+    fn tilde_path_exact_home() {
+        if let Some(home) = dirs::home_dir() {
+            // Edge case: the path IS the home directory.
+            let result = tilde_path(&home);
+            assert_eq!(result, "~/");
+        }
+    }
+
+    #[test]
+    fn tilde_path_outside_home_unchanged() {
+        let path = PathBuf::from("/tmp/some/path");
+        let result = tilde_path(&path);
+        assert_eq!(result, "/tmp/some/path");
+    }
+
+    // -- list_worktrees_status classification ---------------------------------
+
+    /// Verify that the `WorktreeStatus` logic produces the right variant given
+    /// different combinations of `locked` flag and `is_clean` result.
+    /// We test this via a synthetic `WorktreeEntry`-style evaluation rather
+    /// than calling `list_worktrees_status` directly (which needs git on the
+    /// PATH and a real pool dir).
+    #[test]
+    fn status_locked_is_in_use() {
+        // locked=true should always be InUse regardless of cleanliness
+        let locked = true;
+        let exists = true;
+        let clean = true;
+        let status = synthetic_status(locked, exists, clean);
+        assert_eq!(status, WorktreeStatus::InUse);
+    }
+
+    #[test]
+    fn status_nonexistent_is_in_use() {
+        let status = synthetic_status(false, false, true);
+        assert_eq!(status, WorktreeStatus::InUse);
+    }
+
+    #[test]
+    fn status_dirty_is_in_use() {
+        let status = synthetic_status(false, true, false);
+        assert_eq!(status, WorktreeStatus::InUse);
+    }
+
+    #[test]
+    fn status_clean_unlocked_is_available() {
+        let status = synthetic_status(false, true, true);
+        assert_eq!(status, WorktreeStatus::Available);
+    }
+
+    /// Helper that mirrors the `list_worktrees_status` classification logic
+    /// without requiring a live git repository.
+    fn synthetic_status(locked: bool, exists: bool, clean: bool) -> WorktreeStatus {
+        if locked || !exists {
+            WorktreeStatus::InUse
+        } else if clean {
+            WorktreeStatus::Available
+        } else {
+            WorktreeStatus::InUse
+        }
+    }
 
     // -- 7.2: slug normalisation ----------------------------------------------
 
