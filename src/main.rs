@@ -99,6 +99,41 @@ mod tests {
     fn format_stats_processes_and_untracked_skip_uncommitted() {
         assert_eq!(format_stats(&stats(2, 0, 4)), "\u{2699}2 ?4");
     }
+
+    // -- column alignment helpers --------------------------------------------
+
+    /// Compute the visible width the same way the rendering loop does.
+    fn visible_width(tilde: &str, branch: Option<&str>) -> usize {
+        match branch {
+            Some(b) => tilde.chars().count() + 3 + b.chars().count(),
+            None => tilde.chars().count(),
+        }
+    }
+
+    #[test]
+    fn visible_width_no_branch() {
+        // Count manually: "~/.bonsai/bonsai/abc12345" = 25 chars
+        assert_eq!(visible_width("~/.bonsai/bonsai/abc12345", None), 25);
+    }
+
+    #[test]
+    fn visible_width_with_branch() {
+        // 25 + " (" (2) + "main" (4) + ")" (1) = 32
+        assert_eq!(visible_width("~/.bonsai/bonsai/abc12345", Some("main")), 32);
+    }
+
+    #[test]
+    fn padding_aligns_stats_column() {
+        let short = "~/.bonsai/abc";
+        let long = "~/.bonsai/bonsai/abcdef01 (worktree-list-enhancements)";
+        let w_short = visible_width(short, None);
+        let w_long = visible_width(long, None); // already includes branch in label here
+        let max = w_short.max(w_long);
+        let pad_short = " ".repeat(max - w_short);
+        let pad_long = " ".repeat(max - w_long);
+        // Both rows should have path + pad of the same total length.
+        assert_eq!(short.len() + pad_short.len(), long.len() + pad_long.len());
+    }
 }
 
 fn main() {
@@ -137,22 +172,69 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            for (path, status, stats, branch) in &entries {
-                let tilde = worktree::tilde_path(path);
-                let path_display = match branch {
-                    Some(b) => format!("{} ({})", tilde, b.bold()),
-                    None => tilde,
-                };
-                let stats_str = format_stats(stats);
-                match status {
+            // Two-pass rendering: collect rows first so we can measure
+            // the widest path+branch string and pad all rows to the same
+            // column width before printing the stats column.
+            struct Row<'a> {
+                status: &'a worktree::WorktreeStatus,
+                /// Path + optional bold branch — may contain ANSI escape codes.
+                path_display: String,
+                /// Visible character width of `path_display` (no ANSI codes).
+                visible_width: usize,
+                stats_str: String,
+            }
+
+            let rows: Vec<Row<'_>> = entries
+                .iter()
+                .map(|(path, status, stats, branch)| {
+                    let tilde = worktree::tilde_path(path);
+                    // Visible width: tilde chars + " (" + branch + ")" if present.
+                    let visible_width = match branch {
+                        Some(b) => tilde.chars().count() + 3 + b.chars().count(),
+                        None => tilde.chars().count(),
+                    };
+                    let path_display = match branch {
+                        Some(b) => format!("{} ({})", tilde, b.bold()),
+                        None => tilde,
+                    };
+                    Row {
+                        status,
+                        path_display,
+                        visible_width,
+                        stats_str: format_stats(stats),
+                    }
+                })
+                .collect();
+
+            let max_width = rows.iter().map(|r| r.visible_width).max().unwrap_or(0);
+
+            for row in &rows {
+                let pad = " ".repeat(max_width - row.visible_width);
+                match row.status {
                     worktree::WorktreeStatus::Available => {
-                        println!("{}  {}", "available".green(), path_display);
+                        if row.stats_str.is_empty() {
+                            println!("{}  {}{}", "available".green(), row.path_display, pad);
+                        } else {
+                            println!(
+                                "{}  {}{}  {}",
+                                "available".green(),
+                                row.path_display,
+                                pad,
+                                row.stats_str
+                            );
+                        }
                     }
                     worktree::WorktreeStatus::InUse => {
-                        if stats_str.is_empty() {
-                            println!("{}     {}", "in use".red(), path_display);
+                        if row.stats_str.is_empty() {
+                            println!("{}     {}{}", "in use".red(), row.path_display, pad);
                         } else {
-                            println!("{}     {}  {}", "in use".red(), path_display, stats_str);
+                            println!(
+                                "{}     {}{}  {}",
+                                "in use".red(),
+                                row.path_display,
+                                pad,
+                                row.stats_str
+                            );
                         }
                     }
                 }
