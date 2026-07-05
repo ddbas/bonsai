@@ -22,54 +22,54 @@ to running `bs ls`.
 - **WHEN** the user runs `bs ls`
 - **THEN** the process behaves identically to `bs list`
 
-### Requirement: Each worktree is shown on its own line with path, status, and optional process count
+### Requirement: Each worktree is shown on its own line with path, branch, status, and usage stats
 
 `bs list` SHALL print one line per managed pool worktree. Each line SHALL
-contain a coloured status badge, the worktree path (with home directory prefix
-replaced with `~`), and an optional process-count column. The process-count
-column SHALL be printed only when the slot has one or more processes with open
-file handles inside it; otherwise the column SHALL be blank.
+contain:
 
-#### Scenario: Single available worktree
+1. A coloured status badge (`available` in green, `in use` in red).
+2. The worktree path (with home directory prefix replaced with `~`).
+3. Optionally, the checked-out branch name in **bold parentheses** immediately
+   after the path (omitted for detached HEAD).
+4. A compact usage-stats column that shows only non-zero values for: open
+   processes (`⚙N`), uncommitted files (`±N`), and untracked files (`?N`),
+   space-separated. The column is blank for clean idle slots.
 
-- **WHEN** the pool contains one slot that is clean, unlocked, and has no open
-  file handles
+#### Scenario: Single available worktree, detached HEAD
+
+- **WHEN** the pool contains one slot that is clean, unlocked, has no open file
+  handles, and is in detached HEAD state
 - **THEN** stdout SHALL contain one line with a green `available` badge, the
-  tilde-prefixed path, and a blank process-count column
+  tilde-prefixed path, no branch suffix, and a blank stats column
 
-#### Scenario: Single in-use worktree with no open file handles
+#### Scenario: Single available worktree with a branch
 
-- **WHEN** the pool contains one slot that is locked, or has uncommitted changes
-  but no open file handles
-- **THEN** stdout SHALL contain one line with a red `in use` badge, the
-  tilde-prefixed path, and a blank process-count column
+- **WHEN** the pool contains one clean, unlocked, idle slot with branch `main`
+  checked out
+- **THEN** stdout SHALL contain one line with a green `available` badge, the
+  tilde-prefixed path followed by `(main)` in bold, and a blank stats column
 
-#### Scenario: In-use worktree with open file handles shows process count
+#### Scenario: In-use worktree with open file handles
 
-- **WHEN** the pool contains one slot that is in use because processes have
-  files open inside it
-- **WHEN** exactly N distinct processes hold open file handles in that slot
-- **THEN** stdout SHALL contain one line with a red `in use` badge, the
-  tilde-prefixed path, and the number N in the process-count column
+- **WHEN** a slot has 2 open processes
+- **THEN** the stats column SHALL contain `⚙2`
 
-#### Scenario: Dirty worktree with open file handles shows process count
+#### Scenario: In-use worktree with uncommitted changes only
 
-- **WHEN** the pool contains one slot that has both uncommitted changes AND open
-  file handles from N distinct processes
-- **THEN** stdout SHALL contain one line with a red `in use` badge, the
-  tilde-prefixed path, and the number N in the process-count column
-- **NOTE** The presence of uncommitted changes SHALL NOT suppress the count
+- **WHEN** a slot has 3 modified/staged files and no open processes or untracked
+  files
+- **THEN** the stats column SHALL contain `±3`
 
-#### Scenario: Process count column is blank for available slots
+#### Scenario: In-use worktree with all three stats
 
-- **WHEN** a slot is available (clean, unlocked, no open handles)
-- **THEN** the process-count column for that slot SHALL be blank (not `0`)
+- **WHEN** a slot has 1 open process, 2 uncommitted files, and 3 untracked files
+- **THEN** the stats column SHALL be `⚙1 ±2 ?3`
 
 #### Scenario: Mixed pool
 
 - **WHEN** the pool contains multiple slots in different states
 - **THEN** each slot SHALL appear on its own line with the correct badge, path,
-  and process count (blank where not applicable)
+  optional branch, and stats column
 
 ### Requirement: Available status means clean, unlocked, and not opened by any process
 
@@ -135,21 +135,3 @@ replaced with `~` for readability.
 
 - **WHEN** a slot path does not start with the home directory
 - **THEN** the full absolute path SHALL be displayed unchanged
-
-### Requirement: Process count column displays the number of distinct open-file processes
-
-The process-count value shown in `bs list` SHALL be the number of **distinct
-PIDs** that have at least one open file descriptor anywhere inside the slot
-directory, as reported by `lsof +D <slot>`. It SHALL NOT count file descriptors
-— one process with five open files in the slot counts as 1, not 5.
-
-#### Scenario: One process with multiple open files
-
-- **WHEN** one process has three files open inside a slot
-- **THEN** the process-count column SHALL show `1`
-
-#### Scenario: Three distinct processes
-
-- **WHEN** three different processes each have at least one file open inside a
-  slot
-- **THEN** the process-count column SHALL show `3`
