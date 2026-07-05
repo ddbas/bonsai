@@ -19,12 +19,6 @@ $ bs get
 🌳 ~/.bonsai/myrepo/a1b2c3d4
 ```
 
-`bs get` prints the absolute path to the worktree — pipe it straight into `cd`:
-
-```
-$ cd $(bs get)
-```
-
 ```
 $ bs list
 available  ~/.bonsai/myrepo/a1b2c3d4
