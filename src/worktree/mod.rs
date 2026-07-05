@@ -10,6 +10,7 @@
 //! All slots use detached HEAD; branch management is the caller's
 //! responsibility.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -251,21 +252,160 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
 /// Each slot is classified as [`WorktreeStatus::Available`] when it exists on
 /// disk, is not locked, and its working tree is clean; otherwise it is
 /// [`WorktreeStatus::InUse`].
-pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<(PathBuf, WorktreeStatus)>> {
+pub fn list_worktrees_status(
+    pool_dir: &Path,
+) -> Result<Vec<(PathBuf, WorktreeStatus, Option<usize>)>> {
     let entries = list_pool_worktrees(pool_dir)?;
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
-        let status = if entry.locked || !entry.path.exists() {
-            WorktreeStatus::InUse
+        let (status, process_count) = if entry.locked || !entry.path.exists() {
+            (WorktreeStatus::InUse, None)
         } else {
-            match is_clean(&entry.path) {
-                Ok(true) => WorktreeStatus::Available,
-                _ => WorktreeStatus::InUse,
+            let clean = is_clean(&entry.path).unwrap_or(false);
+            let n = count_open_processes(&entry.path)?;
+            if n > 0 {
+                // Open file handles are the primary signal: show count
+                // regardless of whether the working tree is also dirty.
+                (WorktreeStatus::InUse, Some(n))
+            } else if clean {
+                (WorktreeStatus::Available, None)
+            } else {
+                (WorktreeStatus::InUse, None)
             }
         };
-        result.push((entry.path, status));
+        result.push((entry.path, status, process_count));
     }
     Ok(result)
+}
+
+/// Parse PID fields from `lsof +D` stdout and return the count of distinct PIDs.
+///
+/// Skips the header line (starts with `COMMAND`). The PID is the second
+/// whitespace-delimited field on each data line.
+fn parse_lsof_pids(stdout: &str) -> usize {
+    let mut pids: HashSet<&str> = HashSet::new();
+    for line in stdout.lines() {
+        if line.starts_with("COMMAND") {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        fields.next(); // skip command name
+        if let Some(pid_str) = fields.next() {
+            pids.insert(pid_str);
+        }
+    }
+    pids.len()
+}
+
+/// Internal helper: run `lsof_bin +D <path>` and return the number of distinct
+/// PIDs with open file descriptors under `path`.
+///
+/// Separated from `count_open_processes` so tests can pass a non-existent
+/// binary name without mutating the global `PATH` environment variable.
+fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
+    let output = Command::new(lsof_bin)
+        .args(["+D", &path.to_string_lossy()])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "lsof not found on PATH — install lsof to use bs \
+                     (e.g. brew install lsof)"
+                )
+            } else {
+                anyhow::anyhow!("failed to spawn lsof: {}", e)
+            }
+        })?;
+
+    // `lsof +D` exits non-zero on macOS even when files are found; use
+    // stdout/stderr content as the authoritative signals.
+    if output.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.trim().is_empty() {
+            return Ok(0);
+        } else {
+            bail!("lsof error for {}: {}", path.display(), stderr.trim());
+        }
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_lsof_pids(&text))
+}
+
+/// Return the number of distinct PIDs that have open file descriptors anywhere
+/// under `path` (including `path` itself).
+///
+/// Uses `lsof +D <path>` to recursively query open file handles.  The PID
+/// (second whitespace-delimited column) of each non-header output line is
+/// collected into a `HashSet`; the size of that set is returned.
+///
+/// - Non-empty stdout → parses and returns the distinct-PID count.
+/// - Empty stdout + empty stderr → no files are open → returns `Ok(0)`.
+/// - Spawn error (`lsof` not on `PATH`) → returns `Err` with an actionable
+///   message naming `lsof` as the missing dependency.
+/// - Non-empty stderr → `lsof` itself encountered an error → returns `Err`.
+pub fn count_open_processes(path: &Path) -> Result<usize> {
+    run_lsof_count("lsof", path)
+}
+
+/// Internal helper: run `lsof_bin +D <path>` and return whether any process
+/// has open file descriptors under `path`.
+///
+/// Separated from `has_open_files` so tests can pass a non-existent binary
+/// name without mutating the global `PATH` environment variable.
+fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
+    let output = Command::new(lsof_bin)
+        .args(["+D", &path.to_string_lossy()])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "lsof not found on PATH — install lsof to use bs \
+                     (e.g. brew install lsof)"
+                )
+            } else {
+                anyhow::anyhow!("failed to spawn lsof: {}", e)
+            }
+        })?;
+
+    // `lsof +D` exits with a non-zero status code on macOS regardless of
+    // whether it found files or not.  We therefore use stdout/stderr content
+    // as the authoritative signals:
+    //
+    // 1. Non-empty stdout  → lsof found at least one open file descriptor
+    //    → `Ok(true)`.
+    // 2. Empty stdout + empty stderr  → no open file descriptors
+    //    → `Ok(false)`.
+    // 3. Non-empty stderr  → lsof encountered a real error (e.g. the path
+    //    does not exist, or a permission error)  → `Err(...)`.
+    if !output.stdout.is_empty() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.trim().is_empty() {
+        Ok(false)
+    } else {
+        bail!("lsof error for {}: {}", path.display(), stderr.trim())
+    }
+}
+
+/// Detect whether any process currently has an open file descriptor under
+/// `path` (including `path` itself).
+///
+/// Uses `lsof +D <path>` to recursively query open file handles.  The
+/// result is determined by stdout/stderr content (not exit code, which
+/// `lsof` sets unreliably across platforms):
+///
+/// - Non-empty stdout → at least one process has the path open →
+///   returns `Ok(true)`.
+/// - Empty stdout + empty stderr → no files are open → returns `Ok(false)`.
+/// - Spawn error (`lsof` not on `PATH`) → returns `Err` with an actionable
+///   message naming `lsof` as the missing dependency and including an install
+///   hint (e.g. `brew install lsof`).
+/// - Non-empty stderr → `lsof` itself encountered an error → returns `Err`
+///   propagating the `lsof` output.
+pub fn has_open_files(path: &Path) -> Result<bool> {
+    run_lsof("lsof", path)
 }
 
 /// Return `true` if the working tree at `slot_path` has no uncommitted
@@ -313,9 +453,13 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
         if entry.locked || !entry.path.exists() {
             continue;
         }
-        if is_clean(&entry.path)? {
-            return Ok(Some(entry.path));
+        if !is_clean(&entry.path)? {
+            continue;
         }
+        if count_open_processes(&entry.path)? > 0 {
+            continue;
+        }
+        return Ok(Some(entry.path));
     }
     Ok(None)
 }
@@ -448,48 +592,200 @@ mod tests {
     // -- list_worktrees_status classification ---------------------------------
 
     /// Verify that the `WorktreeStatus` logic produces the right variant given
-    /// different combinations of `locked` flag and `is_clean` result.
+    /// different combinations of `locked` flag, `is_clean` result, and
+    /// `open_files` flag.
     /// We test this via a synthetic `WorktreeEntry`-style evaluation rather
     /// than calling `list_worktrees_status` directly (which needs git on the
     /// PATH and a real pool dir).
     #[test]
     fn status_locked_is_in_use() {
         // locked=true should always be InUse regardless of cleanliness
-        let locked = true;
-        let exists = true;
-        let clean = true;
-        let status = synthetic_status(locked, exists, clean);
+        let (status, count) = synthetic_status(true, true, true, 0);
         assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(count, None);
     }
 
     #[test]
     fn status_nonexistent_is_in_use() {
-        let status = synthetic_status(false, false, true);
+        let (status, count) = synthetic_status(false, false, true, 0);
         assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(count, None);
     }
 
     #[test]
     fn status_dirty_is_in_use() {
-        let status = synthetic_status(false, true, false);
+        let (status, count) = synthetic_status(false, true, false, 0);
         assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(count, None);
     }
 
     #[test]
     fn status_clean_unlocked_is_available() {
-        let status = synthetic_status(false, true, true);
+        let (status, count) = synthetic_status(false, true, true, 0);
         assert_eq!(status, WorktreeStatus::Available);
+        assert_eq!(count, None, "available slot should have None process count");
+    }
+
+    #[test]
+    fn status_open_files_is_in_use() {
+        // unlocked + exists + clean + open_count=2 → InUse, Some(2)
+        let (status, count) = synthetic_status(false, true, true, 2);
+        assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(
+            count,
+            Some(2),
+            "in-use-due-to-open-files slot should have Some(n) count"
+        );
+    }
+
+    #[test]
+    fn status_dirty_with_open_files_shows_count() {
+        // unlocked + exists + dirty + open_count=3 → InUse, Some(3)
+        // The dirty flag must not suppress the process count.
+        let (status, count) = synthetic_status(false, true, false, 3);
+        assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(
+            count,
+            Some(3),
+            "dirty slot with open files should still expose process count"
+        );
     }
 
     /// Helper that mirrors the `list_worktrees_status` classification logic
     /// without requiring a live git repository.
-    fn synthetic_status(locked: bool, exists: bool, clean: bool) -> WorktreeStatus {
+    fn synthetic_status(
+        locked: bool,
+        exists: bool,
+        clean: bool,
+        open_count: usize,
+    ) -> (WorktreeStatus, Option<usize>) {
         if locked || !exists {
-            WorktreeStatus::InUse
-        } else if clean {
-            WorktreeStatus::Available
+            (WorktreeStatus::InUse, None)
+        } else if open_count > 0 {
+            // Open file handles win regardless of dirty state.
+            (WorktreeStatus::InUse, Some(open_count))
+        } else if !clean {
+            (WorktreeStatus::InUse, None)
         } else {
-            WorktreeStatus::InUse
+            (WorktreeStatus::Available, None)
         }
+    }
+
+    // -- has_open_files -------------------------------------------------------
+
+    /// A file held open in a temp dir causes `has_open_files` to return `Ok(true)`.
+    #[test]
+    fn has_open_files_returns_true_when_file_open() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let file_path = dir.path().join("held_open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        // Hold the file open for the duration of the assertion.
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let result = has_open_files(dir.path());
+        assert_eq!(
+            result.expect("has_open_files should not error"),
+            true,
+            "a held-open file should cause has_open_files to return true"
+        );
+    }
+
+    /// A temp dir with no open handles returns `Ok(false)`.
+    #[test]
+    fn has_open_files_returns_false_when_no_open_files() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+
+        let result = has_open_files(dir.path());
+        assert_eq!(
+            result.expect("has_open_files should not error"),
+            false,
+            "a dir with no open handles should return false"
+        );
+    }
+
+    /// When the `lsof` binary cannot be found, `has_open_files` returns an
+    /// `Err` whose message names `lsof` as the missing dependency.
+    ///
+    /// Uses `run_lsof` directly with a non-existent binary name to avoid
+    /// mutating the global `PATH` environment variable.
+    #[test]
+    fn has_open_files_err_when_lsof_not_found() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let err = run_lsof("/nonexistent/path/to/lsof-binary-xyz", dir.path())
+            .expect_err("run_lsof should return Err when the binary is not found");
+
+        assert!(
+            err.to_string().contains("lsof"),
+            "error message should mention 'lsof', got: {err}"
+        );
+    }
+
+    // -- count_open_processes -------------------------------------------------
+
+    /// A file held open in a temp dir causes `count_open_processes` to return `Ok(1)`.
+    #[test]
+    fn count_open_processes_returns_one_when_file_open() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let file_path = dir.path().join("held_open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        // Hold the file open for the duration of the assertion.
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let result =
+            count_open_processes(dir.path()).expect("count_open_processes should not error");
+        assert_eq!(result, 1, "one process (this test) holds the file open");
+    }
+
+    /// A temp dir with no open handles returns `Ok(0)`.
+    #[test]
+    fn count_open_processes_returns_zero_when_no_open_files() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+
+        let result =
+            count_open_processes(dir.path()).expect("count_open_processes should not error");
+        assert_eq!(result, 0, "no open handles should return 0");
+    }
+
+    /// Parse correctness: duplicate PIDs in mock lsof output are deduplicated.
+    #[test]
+    fn parse_lsof_pids_deduplicates() {
+        let mock_output = "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n\
+                           vim       100 user  cwd    DIR    1,2      512  123 /tmp/dir\n\
+                           vim       100 user  txt    REG    1,2     4096  456 /tmp/dir/f1\n\
+                           bash      200 user  txt    REG    1,2     4096  789 /tmp/dir/f2\n";
+        assert_eq!(
+            parse_lsof_pids(mock_output),
+            2,
+            "PIDs 100 (twice) and 200 → 2 distinct processes"
+        );
+    }
+
+    /// When `lsof` binary is not on PATH, `count_open_processes` returns `Err`
+    /// whose message mentions `lsof`.
+    #[test]
+    fn count_open_processes_err_when_lsof_not_found() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let err = run_lsof_count("/nonexistent/path/to/lsof-binary-xyz", dir.path())
+            .expect_err("run_lsof_count should return Err when the binary is not found");
+
+        assert!(
+            err.to_string().contains("lsof"),
+            "error message should mention 'lsof', got: {err}"
+        );
     }
 
     // -- 7.2: slug normalisation ----------------------------------------------

@@ -6,7 +6,7 @@ use bonsai::worktree;
 #[derive(Parser)]
 #[command(
     name = "bs",
-    about = "bonsai – project tooling",
+    about = "🌳 bonsai – instantly provision clean git worktrees so you can context-switch without trashing your working tree.",
     long_about = None,
     // Disable built-in `help` subcommand so we can define our own.
     disable_help_subcommand = true,
@@ -75,15 +75,16 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            for (path, status) in &entries {
+            for (path, status, process_count) in &entries {
                 let tilde = worktree::tilde_path(path);
                 match status {
                     worktree::WorktreeStatus::Available => {
                         println!("{}  {}", "available".green(), tilde);
                     }
-                    worktree::WorktreeStatus::InUse => {
-                        println!("{}     {}", "in use".red(), tilde);
-                    }
+                    worktree::WorktreeStatus::InUse => match process_count {
+                        Some(n) => println!("{}     {}  {:>4} processes", "in use".red(), tilde, n),
+                        None => println!("{}     {}", "in use".red(), tilde),
+                    },
                 }
             }
         }

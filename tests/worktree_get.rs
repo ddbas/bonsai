@@ -12,6 +12,62 @@ use std::path::PathBuf as _;
 
 use common::{GitEnv, host_git, path_from_output, worktree_head};
 
+// ── lsof missing: hard error ──────────────────────────────────────────────────
+
+/// When `lsof` is not on PATH and the pool has a slot to scan, `bs get` must
+/// exit non-zero and print an actionable error message that names `lsof` as
+/// the missing dependency.
+#[tokio::test]
+async fn get_fails_with_actionable_error_when_lsof_missing() {
+    let env = GitEnv::new().await;
+
+    // Create the first slot so the pool is non-empty; subsequent calls must
+    // scan it and therefore invoke `lsof`.
+    let _ = env.run_get();
+
+    // Build a fake PATH dir that contains git (symlinked) but not lsof.
+    let fake_bin = tempfile::TempDir::new().expect("fake bin dir");
+    let git_location = which_binary("git").expect("git must be on PATH for this test");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&git_location, fake_bin.path().join("git"))
+        .expect("symlink git into fake bin dir");
+
+    let out = env
+        .bs()
+        .arg("get")
+        .env("PATH", fake_bin.path())
+        .output()
+        .expect("spawn bs get");
+
+    assert!(
+        !out.status.success(),
+        "bs get should exit non-zero when lsof is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lsof"),
+        "stderr should name 'lsof' as the missing dependency, got: {stderr:?}"
+    );
+}
+
+/// Resolve the absolute path of a binary on PATH using the host `which`.
+fn which_binary(name: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(s))
+        }
+    } else {
+        None
+    }
+}
+
 // ── 7.1: repo_slug uses main repo, not the slot name ─────────────────────────
 
 #[tokio::test]
