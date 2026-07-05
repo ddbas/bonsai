@@ -259,13 +259,79 @@ pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<(PathBuf, WorktreeSt
             WorktreeStatus::InUse
         } else {
             match is_clean(&entry.path) {
-                Ok(true) => WorktreeStatus::Available,
+                Ok(true) => {
+                    if has_open_files(&entry.path)? {
+                        WorktreeStatus::InUse
+                    } else {
+                        WorktreeStatus::Available
+                    }
+                }
                 _ => WorktreeStatus::InUse,
             }
         };
         result.push((entry.path, status));
     }
     Ok(result)
+}
+
+/// Internal helper: run `lsof_bin +D <path>` and return whether any process
+/// has open file descriptors under `path`.
+///
+/// Separated from `has_open_files` so tests can pass a non-existent binary
+/// name without mutating the global `PATH` environment variable.
+fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
+    let output = Command::new(lsof_bin)
+        .args(["+D", &path.to_string_lossy()])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "lsof not found on PATH — install lsof to use bs \
+                     (e.g. brew install lsof)"
+                )
+            } else {
+                anyhow::anyhow!("failed to spawn lsof: {}", e)
+            }
+        })?;
+
+    // `lsof +D` exits with a non-zero status code on macOS regardless of
+    // whether it found files or not.  We therefore use stdout/stderr content
+    // as the authoritative signals:
+    //
+    // 1. Non-empty stdout  → lsof found at least one open file descriptor
+    //    → `Ok(true)`.
+    // 2. Empty stdout + empty stderr  → no open file descriptors
+    //    → `Ok(false)`.
+    // 3. Non-empty stderr  → lsof encountered a real error (e.g. the path
+    //    does not exist, or a permission error)  → `Err(...)`.
+    if !output.stdout.is_empty() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.trim().is_empty() {
+        Ok(false)
+    } else {
+        bail!("lsof error for {}: {}", path.display(), stderr.trim())
+    }
+}
+
+/// Detect whether any process currently has an open file descriptor under
+/// `path` (including `path` itself).
+///
+/// Uses `lsof +D <path>` to recursively query open file handles.  The
+/// result is determined by stdout/stderr content (not exit code, which
+/// `lsof` sets unreliably across platforms):
+///
+/// - Non-empty stdout → at least one process has the path open →
+///   returns `Ok(true)`.
+/// - Empty stdout + empty stderr → no files are open → returns `Ok(false)`.
+/// - Spawn error (`lsof` not on `PATH`) → returns `Err` with an actionable
+///   message naming `lsof` as the missing dependency and including an install
+///   hint (e.g. `brew install lsof`).
+/// - Non-empty stderr → `lsof` itself encountered an error → returns `Err`
+///   propagating the `lsof` output.
+pub fn has_open_files(path: &Path) -> Result<bool> {
+    run_lsof("lsof", path)
 }
 
 /// Return `true` if the working tree at `slot_path` has no uncommitted
@@ -313,9 +379,13 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
         if entry.locked || !entry.path.exists() {
             continue;
         }
-        if is_clean(&entry.path)? {
-            return Ok(Some(entry.path));
+        if !is_clean(&entry.path)? {
+            continue;
         }
+        if has_open_files(&entry.path)? {
+            continue;
+        }
+        return Ok(Some(entry.path));
     }
     Ok(None)
 }
@@ -448,48 +518,116 @@ mod tests {
     // -- list_worktrees_status classification ---------------------------------
 
     /// Verify that the `WorktreeStatus` logic produces the right variant given
-    /// different combinations of `locked` flag and `is_clean` result.
+    /// different combinations of `locked` flag, `is_clean` result, and
+    /// `open_files` flag.
     /// We test this via a synthetic `WorktreeEntry`-style evaluation rather
     /// than calling `list_worktrees_status` directly (which needs git on the
     /// PATH and a real pool dir).
     #[test]
     fn status_locked_is_in_use() {
         // locked=true should always be InUse regardless of cleanliness
-        let locked = true;
-        let exists = true;
-        let clean = true;
-        let status = synthetic_status(locked, exists, clean);
+        let status = synthetic_status(true, true, true, false);
         assert_eq!(status, WorktreeStatus::InUse);
     }
 
     #[test]
     fn status_nonexistent_is_in_use() {
-        let status = synthetic_status(false, false, true);
+        let status = synthetic_status(false, false, true, false);
         assert_eq!(status, WorktreeStatus::InUse);
     }
 
     #[test]
     fn status_dirty_is_in_use() {
-        let status = synthetic_status(false, true, false);
+        let status = synthetic_status(false, true, false, false);
         assert_eq!(status, WorktreeStatus::InUse);
     }
 
     #[test]
     fn status_clean_unlocked_is_available() {
-        let status = synthetic_status(false, true, true);
+        let status = synthetic_status(false, true, true, false);
         assert_eq!(status, WorktreeStatus::Available);
+    }
+
+    #[test]
+    fn status_open_files_is_in_use() {
+        // unlocked + exists + clean + open_files=true → InUse
+        let status = synthetic_status(false, true, true, true);
+        assert_eq!(status, WorktreeStatus::InUse);
     }
 
     /// Helper that mirrors the `list_worktrees_status` classification logic
     /// without requiring a live git repository.
-    fn synthetic_status(locked: bool, exists: bool, clean: bool) -> WorktreeStatus {
+    fn synthetic_status(
+        locked: bool,
+        exists: bool,
+        clean: bool,
+        open_files: bool,
+    ) -> WorktreeStatus {
         if locked || !exists {
             WorktreeStatus::InUse
-        } else if clean {
-            WorktreeStatus::Available
-        } else {
+        } else if !clean {
             WorktreeStatus::InUse
+        } else if open_files {
+            WorktreeStatus::InUse
+        } else {
+            WorktreeStatus::Available
         }
+    }
+
+    // -- has_open_files -------------------------------------------------------
+
+    /// A file held open in a temp dir causes `has_open_files` to return `Ok(true)`.
+    #[test]
+    fn has_open_files_returns_true_when_file_open() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let file_path = dir.path().join("held_open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        // Hold the file open for the duration of the assertion.
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let result = has_open_files(dir.path());
+        assert_eq!(
+            result.expect("has_open_files should not error"),
+            true,
+            "a held-open file should cause has_open_files to return true"
+        );
+    }
+
+    /// A temp dir with no open handles returns `Ok(false)`.
+    #[test]
+    fn has_open_files_returns_false_when_no_open_files() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+
+        let result = has_open_files(dir.path());
+        assert_eq!(
+            result.expect("has_open_files should not error"),
+            false,
+            "a dir with no open handles should return false"
+        );
+    }
+
+    /// When the `lsof` binary cannot be found, `has_open_files` returns an
+    /// `Err` whose message names `lsof` as the missing dependency.
+    ///
+    /// Uses `run_lsof` directly with a non-existent binary name to avoid
+    /// mutating the global `PATH` environment variable.
+    #[test]
+    fn has_open_files_err_when_lsof_not_found() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let err = run_lsof("/nonexistent/path/to/lsof-binary-xyz", dir.path())
+            .expect_err("run_lsof should return Err when the binary is not found");
+
+        assert!(
+            err.to_string().contains("lsof"),
+            "error message should mention 'lsof', got: {err}"
+        );
     }
 
     // -- 7.2: slug normalisation ----------------------------------------------
