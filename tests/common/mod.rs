@@ -169,6 +169,15 @@ impl GitEnv {
         env.git(&["add", "."]).await;
         env.git(&["commit", "-m", "init"]).await;
 
+        // Fix permissions so the host runner user can write into the workspace.
+        // On Linux the container runs as root (uid 0) and every file git
+        // creates in the bind-mounted temp dir is owned by root on the host
+        // filesystem.  The host `bs` binary runs as a non-root user (e.g.
+        // uid 1001 on GitHub Actions) and would get EACCES when trying to
+        // create `.git/worktrees/*`.  On macOS, Docker Desktop's VM maps UIDs
+        // transparently so this is a no-op in practice there.
+        env.fix_permissions().await;
+
         env
     }
 
@@ -268,6 +277,23 @@ impl GitEnv {
         path_from_output(&out.stdout)
     }
 
+    /// Make `/workspace` world-accessible so the host runner user (non-root
+    /// on Linux CI) can write into directories created by root inside the
+    /// container (e.g. `.git/worktrees/`).
+    async fn fix_permissions(&self) {
+        let chmod = ExecCommand::new(vec![
+            "chmod".to_string(),
+            "-R".to_string(),
+            "a+rwX".to_string(),
+            "/workspace".to_string(),
+        ])
+        .with_cmd_ready_condition(testcontainers::core::CmdWaitFor::exit_code(0));
+        self._container
+            .exec(chmod)
+            .await
+            .expect("chmod -R a+rwX /workspace failed — is the container still running?");
+    }
+
     /// HEAD SHA of the test repository.
     pub fn head_sha(&self) -> String {
         worktree_head(&self.repo_path)
@@ -280,6 +306,9 @@ impl GitEnv {
         self.git(&["add", "."]).await;
         self.git(&["commit", "-m", &format!("add {filename}")])
             .await;
+        // Re-apply world-writable permissions after each commit so the host
+        // runner user can access newly created .git objects and refs.
+        self.fix_permissions().await;
     }
 
     /// The single repo-slug directory created under `bonsai_path` after the
