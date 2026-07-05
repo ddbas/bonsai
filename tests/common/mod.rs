@@ -225,6 +225,7 @@ impl GitEnv {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
         cmd.current_dir(&self.repo_path)
             .env("BONSAI_ROOT", &self.bonsai_path);
+        Self::apply_safe_directory(&mut cmd);
         cmd
     }
 
@@ -233,7 +234,25 @@ impl GitEnv {
     pub fn bs_from(&self, dir: &Path) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
         cmd.current_dir(dir).env("BONSAI_ROOT", &self.bonsai_path);
+        Self::apply_safe_directory(&mut cmd);
         cmd
+    }
+
+    /// Inject `safe.directory=*` via Git's `GIT_CONFIG_*` environment
+    /// variables so that git sub-processes spawned by `bs` trust the
+    /// test repo regardless of file ownership.
+    ///
+    /// On macOS Docker Desktop maps UIDs transparently, so this is a no-op
+    /// in practice there.  On Linux CI the container runs as root (uid 0)
+    /// and the files it creates in the bind-mounted temp dir are owned by
+    /// root on the host filesystem.  Git 2.35.2+ refuses to operate on a
+    /// repository whose `.git/` is owned by a different user unless the
+    /// path is listed in `safe.directory`.  Setting `*` here is safe
+    /// because these commands only ever run inside the isolated test env.
+    fn apply_safe_directory(cmd: &mut Command) {
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "safe.directory")
+            .env("GIT_CONFIG_VALUE_0", "*");
     }
 
     /// Run `bs get`, assert success, and return the slot path parsed from
