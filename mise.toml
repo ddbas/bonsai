@@ -3,13 +3,13 @@ enter = "lefthook install"
 
 [tasks.build]
 description = "Build the cargo project"
-run = "cargo build"
+run = "rtk cargo build"
 sources = ["Cargo.toml", "src/**/*.rs"]
 outputs = ["target/debug/bs"]
 
 [tasks."build:release"]
 description = "Build the cargo project in release mode"
-run = "cargo build --release"
+run = "rtk cargo build --release"
 sources = ["Cargo.toml", "src/**/*.rs"]
 outputs = ["target/release/bs"]
 
@@ -19,7 +19,7 @@ run = "cargo run"
 
 [tasks.test]
 description = "Run the cargo test suite"
-run = "cargo test"
+run = "rtk cargo test"
 
 [tasks."openspec:open"]
 description = "Render an OpenSpec proposal to HTML and open it in the browser"
@@ -31,6 +31,7 @@ run = "scripts/view-proposal.sh ${usage_change_id?}"
 
 [tools]
 lefthook = "latest"
+"github:rtk-ai/rtk" = "latest"
 "npm:@colbymchenry/codegraph" = "latest"
 "npm:@fission-ai/openspec" = "latest"
 pandoc = "latest"
