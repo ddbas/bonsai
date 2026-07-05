@@ -51,17 +51,17 @@ The following tools must be available on `PATH` at runtime:
 
 ## Running Tests
 
-```bash
-mise run test          # run everything (unit + integration + E2E)
+```
+$ mise run test          # run everything (unit + integration + E2E)
 ```
 
 E2E tests use [testcontainers](https://crates.io/crates/testcontainers) to spin
 up ephemeral Docker containers per test. **Docker must be running.** The first
 run pulls images; subsequent runs use Docker's local cache and are fast.
 
-```bash
-cargo test --test e2e_example    # run only the bootstrap E2E test
-cargo test --test help_command   # run only the CLI help-command tests
+```
+$ cargo test --test e2e_example    # run only the bootstrap E2E test
+$ cargo test --test help_command   # run only the CLI help-command tests
 ```
 
 ### Adding container-backed tests
