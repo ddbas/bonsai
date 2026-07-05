@@ -65,7 +65,37 @@ pub(crate) fn slugify(name: &str) -> String {
 pub struct WorktreeEntry {
     pub path: PathBuf,
     pub locked: bool,
+    /// The checked-out branch name (short form, e.g. `main`), or `None` for
+    /// detached HEAD.
+    pub branch: Option<String>,
 }
+
+/// Counts of open processes and dirty/untracked files for a pool worktree slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeStats {
+    /// Number of distinct PIDs with open file handles inside the slot.
+    pub process_count: usize,
+    /// Number of modified or staged files (`git status --porcelain` lines
+    /// whose two-character XY code is not `??`).
+    pub uncommitted_count: usize,
+    /// Number of untracked files (`git status --porcelain` lines whose XY
+    /// code is `??`).
+    pub untracked_count: usize,
+}
+
+impl WorktreeStats {
+    fn zero() -> Self {
+        WorktreeStats {
+            process_count: 0,
+            uncommitted_count: 0,
+            untracked_count: 0,
+        }
+    }
+}
+
+/// Tuple type returned by [`list_worktrees_status`]: path, status, stats,
+/// and the short branch name (or `None` for detached HEAD).
+pub type WorktreeListEntry = (PathBuf, WorktreeStatus, WorktreeStats, Option<String>);
 
 /// Availability status of a pool worktree slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +243,7 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
     let mut entries: Vec<WorktreeEntry> = Vec::new();
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_locked = false;
+    let mut cur_branch: Option<String> = None;
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
@@ -223,14 +254,24 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
                     entries.push(WorktreeEntry {
                         path: canonical,
                         locked: cur_locked,
+                        branch: cur_branch.take(),
                     });
                 }
             }
             cur_path = Some(PathBuf::from(rest.trim()));
             cur_locked = false;
+            cur_branch = None;
         } else if line.starts_with("locked") {
             cur_locked = true;
+        } else if let Some(refs) = line.strip_prefix("branch ") {
+            // `branch refs/heads/main` → `Some("main")`
+            let short = refs
+                .trim()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(refs.trim());
+            cur_branch = Some(short.to_string());
         }
+        // `detached` line → cur_branch stays None
     }
 
     // Flush the last entry.
@@ -240,6 +281,7 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
             entries.push(WorktreeEntry {
                 path: canonical,
                 locked: cur_locked,
+                branch: cur_branch.take(),
             });
         }
     }
@@ -247,33 +289,75 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(entries)
 }
 
-/// Return the availability status of every pool worktree slot.
+/// Count the uncommitted (modified/staged) and untracked files in `slot_path`.
+///
+/// Runs `git -C <slot_path> status --porcelain` and classifies each output
+/// line by its two-character XY status code:
+/// - Lines where XY == `??` → untracked files.
+/// - All other non-empty lines → modified or staged files.
+///
+/// Returns `(uncommitted_count, untracked_count)`.
+pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
+    let output = git_cmd()
+        .args(["-C", &slot_path.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .context("failed to spawn `git status --porcelain`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`git status --porcelain` failed for {}: {}",
+            slot_path.display(),
+            stderr.trim()
+        );
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut uncommitted = 0usize;
+    let mut untracked = 0usize;
+    for line in text.lines() {
+        if line.len() >= 2 && &line[..2] == "??" {
+            untracked += 1;
+        } else if !line.is_empty() {
+            uncommitted += 1;
+        }
+    }
+    Ok((uncommitted, untracked))
+}
+
+/// Return the availability status and usage stats of every pool worktree slot.
 ///
 /// Each slot is classified as [`WorktreeStatus::Available`] when it exists on
-/// disk, is not locked, and its working tree is clean; otherwise it is
+/// disk, is not locked, and its working tree is clean (no uncommitted or
+/// untracked files, no open process handles); otherwise it is
 /// [`WorktreeStatus::InUse`].
-pub fn list_worktrees_status(
-    pool_dir: &Path,
-) -> Result<Vec<(PathBuf, WorktreeStatus, Option<usize>)>> {
+///
+/// The returned tuple is `(path, status, stats, branch)` where `branch` is
+/// the short checked-out branch name (`None` for detached HEAD).
+pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> {
     let entries = list_pool_worktrees(pool_dir)?;
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
-        let (status, process_count) = if entry.locked || !entry.path.exists() {
-            (WorktreeStatus::InUse, None)
+        let branch = entry.branch.clone();
+        let (status, stats) = if entry.locked || !entry.path.exists() {
+            (WorktreeStatus::InUse, WorktreeStats::zero())
         } else {
-            let clean = is_clean(&entry.path).unwrap_or(false);
-            let n = count_open_processes(&entry.path)?;
-            if n > 0 {
-                // Open file handles are the primary signal: show count
-                // regardless of whether the working tree is also dirty.
-                (WorktreeStatus::InUse, Some(n))
-            } else if clean {
-                (WorktreeStatus::Available, None)
+            let process_count = count_open_processes(&entry.path)?;
+            let (uncommitted_count, untracked_count) =
+                count_git_status_files(&entry.path).unwrap_or((0, 0));
+            let stats = WorktreeStats {
+                process_count,
+                uncommitted_count,
+                untracked_count,
+            };
+            let is_clean = uncommitted_count == 0 && untracked_count == 0;
+            if process_count > 0 || !is_clean {
+                (WorktreeStatus::InUse, stats)
             } else {
-                (WorktreeStatus::InUse, None)
+                (WorktreeStatus::Available, stats)
             }
         };
-        result.push((entry.path, status, process_count));
+        result.push((entry.path, status, stats, branch));
     }
     Ok(result)
 }
@@ -592,63 +676,59 @@ mod tests {
     // -- list_worktrees_status classification ---------------------------------
 
     /// Verify that the `WorktreeStatus` logic produces the right variant given
-    /// different combinations of `locked` flag, `is_clean` result, and
-    /// `open_files` flag.
-    /// We test this via a synthetic `WorktreeEntry`-style evaluation rather
-    /// than calling `list_worktrees_status` directly (which needs git on the
-    /// PATH and a real pool dir).
+    /// different combinations of `locked` flag, file counts, and process count.
+    /// We test this via a synthetic classification rather than calling
+    /// `list_worktrees_status` directly (which needs git on PATH and a real
+    /// pool dir).
     #[test]
     fn status_locked_is_in_use() {
-        // locked=true should always be InUse regardless of cleanliness
-        let (status, count) = synthetic_status(true, true, true, 0);
+        let (status, stats) = synthetic_status(true, true, 0, 0, 0);
         assert_eq!(status, WorktreeStatus::InUse);
-        assert_eq!(count, None);
+        assert_eq!(stats.process_count, 0);
     }
 
     #[test]
     fn status_nonexistent_is_in_use() {
-        let (status, count) = synthetic_status(false, false, true, 0);
+        let (status, _) = synthetic_status(false, false, 0, 0, 0);
         assert_eq!(status, WorktreeStatus::InUse);
-        assert_eq!(count, None);
     }
 
     #[test]
     fn status_dirty_is_in_use() {
-        let (status, count) = synthetic_status(false, true, false, 0);
+        let (status, stats) = synthetic_status(false, true, 1, 0, 0);
         assert_eq!(status, WorktreeStatus::InUse);
-        assert_eq!(count, None);
+        assert_eq!(stats.process_count, 0);
+        assert_eq!(stats.uncommitted_count, 1);
     }
 
     #[test]
     fn status_clean_unlocked_is_available() {
-        let (status, count) = synthetic_status(false, true, true, 0);
+        let (status, stats) = synthetic_status(false, true, 0, 0, 0);
         assert_eq!(status, WorktreeStatus::Available);
-        assert_eq!(count, None, "available slot should have None process count");
+        assert_eq!(
+            stats.process_count, 0,
+            "available slot should have 0 process count"
+        );
+        assert_eq!(stats.uncommitted_count, 0);
+        assert_eq!(stats.untracked_count, 0);
     }
 
     #[test]
     fn status_open_files_is_in_use() {
-        // unlocked + exists + clean + open_count=2 → InUse, Some(2)
-        let (status, count) = synthetic_status(false, true, true, 2);
+        let (status, stats) = synthetic_status(false, true, 0, 0, 2);
         assert_eq!(status, WorktreeStatus::InUse);
-        assert_eq!(
-            count,
-            Some(2),
-            "in-use-due-to-open-files slot should have Some(n) count"
-        );
+        assert_eq!(stats.process_count, 2);
     }
 
     #[test]
     fn status_dirty_with_open_files_shows_count() {
-        // unlocked + exists + dirty + open_count=3 → InUse, Some(3)
-        // The dirty flag must not suppress the process count.
-        let (status, count) = synthetic_status(false, true, false, 3);
+        let (status, stats) = synthetic_status(false, true, 1, 0, 3);
         assert_eq!(status, WorktreeStatus::InUse);
         assert_eq!(
-            count,
-            Some(3),
-            "dirty slot with open files should still expose process count"
+            stats.process_count, 3,
+            "dirty slot with open files should expose process count"
         );
+        assert_eq!(stats.uncommitted_count, 1);
     }
 
     /// Helper that mirrors the `list_worktrees_status` classification logic
@@ -656,22 +736,112 @@ mod tests {
     fn synthetic_status(
         locked: bool,
         exists: bool,
-        clean: bool,
+        uncommitted: usize,
+        untracked: usize,
         open_count: usize,
-    ) -> (WorktreeStatus, Option<usize>) {
+    ) -> (WorktreeStatus, WorktreeStats) {
         if locked || !exists {
-            (WorktreeStatus::InUse, None)
-        } else if open_count > 0 {
-            // Open file handles win regardless of dirty state.
-            (WorktreeStatus::InUse, Some(open_count))
-        } else if !clean {
-            (WorktreeStatus::InUse, None)
+            (WorktreeStatus::InUse, WorktreeStats::zero())
         } else {
-            (WorktreeStatus::Available, None)
+            let stats = WorktreeStats {
+                process_count: open_count,
+                uncommitted_count: uncommitted,
+                untracked_count: untracked,
+            };
+            let is_clean = uncommitted == 0 && untracked == 0;
+            if open_count > 0 || !is_clean {
+                (WorktreeStatus::InUse, stats)
+            } else {
+                (WorktreeStatus::Available, stats)
+            }
         }
     }
 
-    // -- has_open_files -------------------------------------------------------
+    // -- branch parsing from porcelain ---------------------------------------
+
+    /// `list_pool_worktrees` should parse `branch refs/heads/main` and expose
+    /// it as `Some("main")`.
+    ///
+    /// We test the parsing logic indirectly via a helper that mimics the inner
+    /// loop without needing a real git repo.
+    #[test]
+    fn parse_branch_refs_heads_strips_prefix() {
+        let refs = "refs/heads/main";
+        let short = refs.strip_prefix("refs/heads/").unwrap_or(refs);
+        assert_eq!(short, "main");
+    }
+
+    #[test]
+    fn parse_branch_refs_heads_nested() {
+        let refs = "refs/heads/feature/my-work";
+        let short = refs.strip_prefix("refs/heads/").unwrap_or(refs);
+        assert_eq!(short, "feature/my-work");
+    }
+
+    #[test]
+    fn parse_branch_detached_yields_none() {
+        // The `detached` line does not start with `branch `, so cur_branch
+        // should remain None.  Verify that the sentinel string is unchanged.
+        let line = "detached";
+        let branch = if let Some(refs) = line.strip_prefix("branch ") {
+            Some(refs.strip_prefix("refs/heads/").unwrap_or(refs).to_string())
+        } else {
+            None
+        };
+        assert!(branch.is_none());
+    }
+
+    // -- count_git_status_files parsing -------------------------------------
+
+    /// Lines starting with `??` should count as untracked; others as
+    /// uncommitted.
+    #[test]
+    fn count_git_status_files_classifies_correctly() {
+        let porcelain = " M src/main.rs\n?? build/\nA  new_file.rs\n?? tmp/\n";
+        let mut uncommitted = 0usize;
+        let mut untracked = 0usize;
+        for line in porcelain.lines() {
+            if line.len() >= 2 && &line[..2] == "??" {
+                untracked += 1;
+            } else if !line.is_empty() {
+                uncommitted += 1;
+            }
+        }
+        assert_eq!(uncommitted, 2, " M and A lines are uncommitted");
+        assert_eq!(untracked, 2, "?? lines are untracked");
+    }
+
+    #[test]
+    fn count_git_status_files_empty_output() {
+        let porcelain = "";
+        let mut uncommitted = 0usize;
+        let mut untracked = 0usize;
+        for line in porcelain.lines() {
+            if line.len() >= 2 && &line[..2] == "??" {
+                untracked += 1;
+            } else if !line.is_empty() {
+                uncommitted += 1;
+            }
+        }
+        assert_eq!(uncommitted, 0);
+        assert_eq!(untracked, 0);
+    }
+
+    #[test]
+    fn count_git_status_files_only_untracked() {
+        let porcelain = "?? foo.txt\n?? bar.txt\n";
+        let mut uncommitted = 0usize;
+        let mut untracked = 0usize;
+        for line in porcelain.lines() {
+            if line.len() >= 2 && &line[..2] == "??" {
+                untracked += 1;
+            } else if !line.is_empty() {
+                uncommitted += 1;
+            }
+        }
+        assert_eq!(uncommitted, 0);
+        assert_eq!(untracked, 2);
+    }
 
     /// A file held open in a temp dir causes `has_open_files` to return `Ok(true)`.
     #[test]

@@ -80,7 +80,81 @@ async fn list_one_available_slot() {
     );
 }
 
-// ── 4.3: slot with uncommitted changes ───────────────────────────────────────
+// ── 4.4: branch and stats display ───────────────────────────────────────────
+
+/// After `bs get` provisions a slot in detached HEAD, we manually attach a
+/// branch to the slot with `host_git`, add an untracked file, and verify:
+/// - the branch name appears in `bs list` output
+/// - the stats column shows `?1`
+#[tokio::test]
+async fn list_shows_branch_and_untracked_stats() {
+    let env = GitEnv::new().await;
+    let slot = env.run_get();
+
+    // Attach a named branch to the slot (host git is fine for this).
+    let attach = common::host_git(&slot, &["checkout", "-b", "feature/my-work"]);
+    assert!(
+        attach.status.success(),
+        "git checkout -b failed: {}",
+        String::from_utf8_lossy(&attach.stderr)
+    );
+
+    // Add an untracked file.
+    std::fs::write(slot.join("untracked.txt"), "hello").expect("write untracked file");
+
+    let out = env.bs().arg("list").output().expect("spawn bs list");
+    assert!(
+        out.status.success(),
+        "bs list should exit 0\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("feature/my-work"),
+        "expected branch name 'feature/my-work' in output, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("?1"),
+        "expected untracked stat '?1' in output, got: {stdout:?}"
+    );
+}
+
+/// A slot with a branch attached and a clean working tree shows the branch
+/// name with an `available` badge and no stat icons.
+#[tokio::test]
+async fn list_available_slot_shows_branch_no_stats() {
+    let env = GitEnv::new().await;
+    let slot = env.run_get();
+
+    // Attach a branch without touching any files (slot stays clean).
+    let attach = common::host_git(&slot, &["checkout", "-b", "clean-branch"]);
+    assert!(
+        attach.status.success(),
+        "git checkout -b failed: {}",
+        String::from_utf8_lossy(&attach.stderr)
+    );
+
+    let out = env.bs().arg("list").output().expect("spawn bs list");
+    assert!(out.status.success());
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("clean-branch"),
+        "expected branch name 'clean-branch' in output, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("available"),
+        "expected 'available' badge, got: {stdout:?}"
+    );
+    // No stat icons should be present for a clean slot.
+    assert!(
+        !stdout.contains("?1") && !stdout.contains('\u{00b1}') && !stdout.contains('\u{2699}'),
+        "clean slot should have no stat icons, got: {stdout:?}"
+    );
+}
 
 /// A slot with an untracked/modified file is reported as `in use`.
 #[tokio::test]

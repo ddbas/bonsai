@@ -39,6 +39,68 @@ enum Commands {
     Help,
 }
 
+fn format_stats(stats: &worktree::WorktreeStats) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if stats.process_count > 0 {
+        parts.push(format!("\u{2699}{}", stats.process_count)); // ⚙
+    }
+    if stats.uncommitted_count > 0 {
+        parts.push(format!("\u{00b1}{}", stats.uncommitted_count)); // ±
+    }
+    if stats.untracked_count > 0 {
+        parts.push(format!("?{}", stats.untracked_count));
+    }
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bonsai::worktree::WorktreeStats;
+
+    fn stats(
+        process_count: usize,
+        uncommitted_count: usize,
+        untracked_count: usize,
+    ) -> WorktreeStats {
+        WorktreeStats {
+            process_count,
+            uncommitted_count,
+            untracked_count,
+        }
+    }
+
+    #[test]
+    fn format_stats_all_zero_is_empty() {
+        assert_eq!(format_stats(&stats(0, 0, 0)), "");
+    }
+
+    #[test]
+    fn format_stats_all_three_non_zero() {
+        assert_eq!(format_stats(&stats(1, 2, 3)), "\u{2699}1 \u{00b1}2 ?3");
+    }
+
+    #[test]
+    fn format_stats_only_processes() {
+        assert_eq!(format_stats(&stats(5, 0, 0)), "\u{2699}5");
+    }
+
+    #[test]
+    fn format_stats_only_uncommitted() {
+        assert_eq!(format_stats(&stats(0, 3, 0)), "\u{00b1}3");
+    }
+
+    #[test]
+    fn format_stats_only_untracked() {
+        assert_eq!(format_stats(&stats(0, 0, 4)), "?4");
+    }
+
+    #[test]
+    fn format_stats_processes_and_untracked_skip_uncommitted() {
+        assert_eq!(format_stats(&stats(2, 0, 4)), "\u{2699}2 ?4");
+    }
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -75,16 +137,24 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            for (path, status, process_count) in &entries {
+            for (path, status, stats, branch) in &entries {
                 let tilde = worktree::tilde_path(path);
+                let path_display = match branch {
+                    Some(b) => format!("{} ({})", tilde, b.bold()),
+                    None => tilde,
+                };
+                let stats_str = format_stats(stats);
                 match status {
                     worktree::WorktreeStatus::Available => {
-                        println!("{}  {}", "available".green(), tilde);
+                        println!("{}  {}", "available".green(), path_display);
                     }
-                    worktree::WorktreeStatus::InUse => match process_count {
-                        Some(n) => println!("{}     {}  {:>4} processes", "in use".red(), tilde, n),
-                        None => println!("{}     {}", "in use".red(), tilde),
-                    },
+                    worktree::WorktreeStatus::InUse => {
+                        if stats_str.is_empty() {
+                            println!("{}     {}", "in use".red(), path_display);
+                        } else {
+                            println!("{}     {}  {}", "in use".red(), path_display, stats_str);
+                        }
+                    }
                 }
             }
         }
