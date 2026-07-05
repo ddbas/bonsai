@@ -1,154 +1,25 @@
 //! Integration tests for `bs get` (and the default-command behaviour).
 //!
-//! Each test creates an isolated temporary git repository and a temporary
-//! `BONSAI_ROOT` directory so there is no interaction with the developer's
-//! real `~/.bonsai` pool or the host repository.
+//! Every test uses [`common::GitEnv`], which spins up a Docker container
+//! with a pinned `alpine/git` image.  All git operations (init, commit,
+//! worktree manipulation) run inside that container so the host machine's
+//! git configuration, environment variables, and `~/.bonsai` directory are
+//! never touched.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
-use tempfile::TempDir;
+use std::path::PathBuf as _;
 
-// ── Test harness ──────────────────────────────────────────────────────────────
-
-/// Holds all temporary state for one test: a fresh git repo and a fresh
-/// bonsai root directory (passed to the binary via `BONSAI_ROOT`).
-struct TestEnv {
-    repo: TempDir,
-    bonsai_root: TempDir,
-}
-
-impl TestEnv {
-    /// Create a new test environment with a git repo containing one commit.
-    fn new() -> Self {
-        let repo = TempDir::new().expect("temp repo dir");
-        let bonsai_root = TempDir::new().expect("temp bonsai root");
-
-        let p = repo.path();
-        git(p, &["init"]);
-        git(p, &["config", "user.email", "test@example.com"]);
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "commit.gpgsign", "false"]);
-        std::fs::write(p.join("README.md"), "# test").unwrap();
-        git(p, &["add", "."]);
-        git(p, &["commit", "-m", "init"]);
-
-        TestEnv { repo, bonsai_root }
-    }
-
-    /// A `bs` command builder with CWD=repo and BONSAI_ROOT set.
-    fn bs(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
-        cmd.current_dir(self.repo.path())
-            .env("BONSAI_ROOT", self.bonsai_root.path());
-        cmd
-    }
-
-    /// A `bs` command builder with CWD overridden to `dir` (e.g. a slot).
-    fn bs_from(&self, dir: &Path) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bs"));
-        cmd.current_dir(dir)
-            .env("BONSAI_ROOT", self.bonsai_root.path());
-        cmd
-    }
-
-    /// Run `bs get`, assert success, and return the slot path from stdout.
-    fn run_get(&self) -> PathBuf {
-        let out = self.bs().arg("get").output().expect("failed to spawn bs");
-        assert!(
-            out.status.success(),
-            "bs get failed\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        path_from_output(&out.stdout)
-    }
-
-    /// HEAD SHA of the test repo.
-    fn head_sha(&self) -> String {
-        head_sha(self.repo.path())
-    }
-
-    /// Make a new commit in the test repo.
-    fn make_commit(&self, filename: &str, content: &str) {
-        std::fs::write(self.repo.path().join(filename), content).unwrap();
-        git(self.repo.path(), &["add", "."]);
-        git(
-            self.repo.path(),
-            &["commit", "-m", &format!("add {filename}")],
-        );
-    }
-
-    /// The single slug directory created under `bonsai_root` after the first
-    /// `bs get`.  Panics if there isn't exactly one.
-    fn slug_dir(&self) -> PathBuf {
-        let entries: Vec<_> = std::fs::read_dir(self.bonsai_root.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().canonicalize().unwrap_or_else(|_| e.path()))
-            .collect();
-        assert_eq!(
-            entries.len(),
-            1,
-            "expected exactly one slug dir under bonsai root, found: {entries:?}"
-        );
-        entries.into_iter().next().unwrap()
-    }
-
-    /// All slot directories under the slug directory (sorted).
-    fn slots(&self) -> Vec<PathBuf> {
-        let mut v: Vec<_> = std::fs::read_dir(self.slug_dir())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect();
-        v.sort();
-        v
-    }
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-/// Run a git command in `dir`; panic on failure.
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-    assert!(status.success(), "git {args:?} failed in {}", dir.display());
-}
-
-/// Parse the worktree path from `bs get` stdout.
-///
-/// stdout format: `🌳 /absolute/path/to/slot\n`
-fn path_from_output(raw: &[u8]) -> PathBuf {
-    let text = String::from_utf8_lossy(raw);
-    // Strip the leading tree emoji and any surrounding whitespace.
-    let stripped = text.trim().trim_start_matches('🌳').trim();
-    PathBuf::from(stripped)
-}
-
-/// HEAD SHA of the worktree at `path`.
-fn head_sha(path: &Path) -> String {
-    let out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
+use common::{GitEnv, host_git, path_from_output, worktree_head};
 
 // ── 7.1: repo_slug uses main repo, not the slot name ─────────────────────────
 
-#[test]
-fn slug_derived_from_main_repo_not_slot() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn slug_derived_from_main_repo_not_slot() {
+    let env = GitEnv::new().await;
     let slot1 = env.run_get();
 
-    // Make slot1 dirty so a new slot is forced on the next call.
+    // Dirty slot1 so the next call is forced to create a new slot.
     std::fs::write(slot1.join("dirty.txt"), "dirty").unwrap();
 
     // Run `bs get` from *inside* slot1 (a linked worktree).
@@ -156,7 +27,7 @@ fn slug_derived_from_main_repo_not_slot() {
         .bs_from(&slot1)
         .arg("get")
         .output()
-        .expect("bs failed from linked worktree");
+        .expect("spawn bs from linked worktree");
     assert!(
         out.status.success(),
         "bs get from linked worktree failed:\n{}",
@@ -166,22 +37,23 @@ fn slug_derived_from_main_repo_not_slot() {
     let slot2 = path_from_output(&out.stdout);
     let slug_dir = env.slug_dir();
 
-    // The new slot should be under the same slug directory (main repo's
-    // name), not under a directory named after the slot itself.
+    // The new slot should sit under the *main repo's* slug directory, not a
+    // directory derived from the slot's own name.
     assert!(
         slot2.starts_with(&slug_dir),
-        "slot from linked worktree should be under slug_dir {slug_dir:?}, got {slot2:?}"
+        "slot from linked worktree should be under slug_dir {slug_dir:?}, \
+         got {slot2:?}"
     );
 }
 
-// ── 7.4 / 8.6: dirty slot skipped, new slot created ─────────────────────────
+// ── 7.4 / 8.6: dirty slot skipped → new slot created ────────────────────────
 
-#[test]
-fn dirty_slot_skipped_new_slot_created() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn dirty_slot_skipped_new_slot_created() {
+    let env = GitEnv::new().await;
     let slot1 = env.run_get();
 
-    // Make slot1 dirty (untracked file → status --porcelain is non-empty).
+    // Untracked file makes `git status --porcelain` non-empty → slot is dirty.
     std::fs::write(slot1.join("dirty.txt"), "dirty").unwrap();
 
     let slot2 = env.run_get();
@@ -190,15 +62,16 @@ fn dirty_slot_skipped_new_slot_created() {
     assert!(slot1.exists(), "dirty slot must not be removed");
 }
 
-// ── 7.5 / 8.7: locked slot skipped, new slot created ────────────────────────
+// ── 7.5 / 8.7: locked slot skipped → new slot created ───────────────────────
 
-#[test]
-fn locked_slot_skipped_new_slot_created() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn locked_slot_skipped_new_slot_created() {
+    let env = GitEnv::new().await;
     let slot1 = env.run_get();
 
-    git(
-        env.repo.path(),
+    // Lock via host git (worktree is registered in the host repo).
+    host_git(
+        &env.repo_path,
         &["worktree", "lock", &slot1.to_string_lossy()],
     );
 
@@ -207,36 +80,36 @@ fn locked_slot_skipped_new_slot_created() {
     assert!(slot2.exists());
 
     // Unlock for clean teardown.
-    let _ = Command::new("git")
-        .args(["worktree", "unlock", &slot1.to_string_lossy()])
-        .current_dir(env.repo.path())
-        .status();
+    let _ = host_git(
+        &env.repo_path,
+        &["worktree", "unlock", &slot1.to_string_lossy()],
+    );
 }
 
 // ── 7.6: first clean unlocked slot is returned ───────────────────────────────
 
-#[test]
-fn first_clean_unlocked_slot_returned() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn first_clean_unlocked_slot_returned() {
+    let env = GitEnv::new().await;
 
-    // Create slot1, then dirty it.
+    // slot1 → dirty
     let slot1 = env.run_get();
     std::fs::write(slot1.join("dirty.txt"), "dirty").unwrap();
 
-    // Create slot2 (clean).
+    // slot2 → clean
     let slot2 = env.run_get();
     assert_ne!(slot1, slot2);
 
-    // Third call: slot1 is dirty, slot2 is clean → slot2 reused.
+    // Third call: slot1 dirty, slot2 clean → slot2 reused.
     let slot3 = env.run_get();
     assert_eq!(slot2, slot3, "clean slot2 should be reused");
 }
 
 // ── 7.7 / 8.3: empty pool → new UUID slot created ────────────────────────────
 
-#[test]
-fn empty_pool_creates_new_slot() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn empty_pool_creates_new_slot() {
+    let env = GitEnv::new().await;
     let slot = env.run_get();
 
     assert!(slot.exists(), "slot must exist on disk");
@@ -251,29 +124,26 @@ fn empty_pool_creates_new_slot() {
 
 // ── 8.1: pool dirs created on first run ──────────────────────────────────────
 
-#[test]
-fn pool_dirs_created_on_first_run() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn pool_dirs_created_on_first_run() {
+    let env = GitEnv::new().await;
 
-    // BONSAI_ROOT exists but is empty before the first run.
-    let pre: Vec<_> = std::fs::read_dir(env.bonsai_root.path()).unwrap().collect();
+    let pre: Vec<_> = std::fs::read_dir(&env.bonsai_path).unwrap().collect();
     assert!(
         pre.is_empty(),
-        "bonsai_root should be empty before first run"
+        "bonsai_path should be empty before first run"
     );
 
     let slot = env.run_get();
-    assert!(slot.exists(), "slot must exist");
-
-    let slug_dir = env.slug_dir();
-    assert!(slug_dir.is_dir(), "slug directory must be created");
+    assert!(slot.exists());
+    assert!(env.slug_dir().is_dir());
 }
 
 // ── 8.2: pool dir creation is idempotent ─────────────────────────────────────
 
-#[test]
-fn pool_dirs_idempotent() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn pool_dirs_idempotent() {
+    let env = GitEnv::new().await;
     env.run_get();
     // Second call must not error even though the directories already exist.
     env.run_get();
@@ -281,9 +151,9 @@ fn pool_dirs_idempotent() {
 
 // ── 8.4: existing clean slot is reused ───────────────────────────────────────
 
-#[test]
-fn existing_clean_slot_reused() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn existing_clean_slot_reused() {
+    let env = GitEnv::new().await;
     let slot1 = env.run_get();
     let slot2 = env.run_get();
 
@@ -293,24 +163,24 @@ fn existing_clean_slot_reused() {
 
 // ── 8.5: slot reset to current HEAD after a new commit ───────────────────────
 
-#[test]
-fn slot_reset_to_new_head() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn slot_reset_to_new_head() {
+    let env = GitEnv::new().await;
 
     let slot = env.run_get();
     let old_head = env.head_sha();
-    assert_eq!(head_sha(&slot), old_head);
+    assert_eq!(worktree_head(&slot), old_head);
 
-    // Advance HEAD.
-    env.make_commit("second.txt", "v2");
+    // Advance HEAD via the container (isolated from host git config).
+    env.make_commit("second.txt", "v2").await;
     let new_head = env.head_sha();
     assert_ne!(old_head, new_head);
 
-    // Second `bs get` should reset the existing clean slot.
+    // Second `bs get` should reset the existing clean slot to the new HEAD.
     let slot2 = env.run_get();
     assert_eq!(slot, slot2, "same slot should be reused");
     assert_eq!(
-        head_sha(&slot),
+        worktree_head(&slot),
         new_head,
         "slot HEAD should be updated to the new commit"
     );
@@ -318,13 +188,13 @@ fn slot_reset_to_new_head() {
 
 // ── 8.8: stale registration pruned ───────────────────────────────────────────
 
-#[test]
-fn stale_registration_pruned() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn stale_registration_pruned() {
+    let env = GitEnv::new().await;
     let slot = env.run_get();
     assert!(slot.exists());
 
-    // Delete the slot directory to create a stale git worktree registration.
+    // Manually delete the slot directory to create a stale registration.
     std::fs::remove_dir_all(&slot).unwrap();
     assert!(!slot.exists());
 
@@ -338,9 +208,9 @@ fn stale_registration_pruned() {
 
 // ── 8.9: called from a linked worktree ───────────────────────────────────────
 
-#[test]
-fn called_from_linked_worktree_uses_main_repo_slug() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn called_from_linked_worktree_uses_main_repo_slug() {
+    let env = GitEnv::new().await;
 
     let slot1 = env.run_get();
     let slug_dir = env.slug_dir();
@@ -352,7 +222,7 @@ fn called_from_linked_worktree_uses_main_repo_slug() {
         .bs_from(&slot1)
         .arg("get")
         .output()
-        .expect("bs failed from linked worktree");
+        .expect("spawn bs from linked worktree");
     assert!(
         out.status.success(),
         "bs get from linked worktree failed:\n{}",
@@ -368,32 +238,31 @@ fn called_from_linked_worktree_uses_main_repo_slug() {
 
 // ── 8.10: `bs` with no subcommand behaves like `bs get` ──────────────────────
 
-#[test]
-fn no_subcommand_behaves_like_bs_get() {
-    let env = TestEnv::new();
+#[tokio::test]
+async fn no_subcommand_behaves_like_bs_get() {
+    let env = GitEnv::new().await;
 
-    // Run `bs` (no subcommand).
-    let out_noarg = env.bs().output().expect("bs failed");
+    let out_noarg = env.bs().output().expect("spawn bs");
     assert!(out_noarg.status.success(), "bs with no args should exit 0");
     let path_noarg = path_from_output(&out_noarg.stdout);
 
-    // The slot is now clean; `bs get` should reuse it.
-    let out_get = env.bs().arg("get").output().expect("bs get failed");
+    // The slot from the first call is now clean; `bs get` reuses it.
+    let out_get = env.bs().arg("get").output().expect("spawn bs get");
     assert!(out_get.status.success());
     let path_get = path_from_output(&out_get.stdout);
 
     assert_eq!(
         path_noarg, path_get,
-        "`bs` and `bs get` should return the same slot path"
+        "`bs` and `bs get` should return the same slot"
     );
 }
 
 // ── emoji in stdout ───────────────────────────────────────────────────────────
 
-#[test]
-fn get_output_contains_tree_emoji() {
-    let env = TestEnv::new();
-    let out = env.bs().arg("get").output().expect("bs get failed");
+#[tokio::test]
+async fn get_output_contains_tree_emoji() {
+    let env = GitEnv::new().await;
+    let out = env.bs().arg("get").output().expect("spawn bs get");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains('🌳'),
