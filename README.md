@@ -14,22 +14,26 @@ milliseconds.
 
 ## Quick Start
 
-```bash
-# Get a clean worktree for the current HEAD (creates one if the pool is empty)
-bs get
-
-# List every slot in the pool with its availability status
-bs list
-
-# Re-print this help
-bs help
+```
+$ bs get
+🌳 ~/.bonsai/myrepo/a1b2c3d4
 ```
 
-`bs get` prints the absolute path to the worktree, making it easy to `cd` into
-it:
+`bs get` prints the absolute path to the worktree — pipe it straight into `cd`:
 
-```bash
-cd $(bs get)
+```
+$ cd $(bs get)
+```
+
+```
+$ bs list
+available  ~/.bonsai/myrepo/a1b2c3d4
+in use     ~/.bonsai/myrepo/b5c6d7e8 (main)      ⚙2
+in use     ~/.bonsai/myrepo/c9d0e1f2 (my-feature)
+```
+
+```
+$ bs help
 ```
 
 ## Install
