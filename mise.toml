@@ -17,9 +17,10 @@ outputs = ["target/release/bs"]
 description = "Run the cargo project"
 run = "cargo run"
 
-[tasks.test]
-description = "Run the cargo test suite"
-run = "rtk cargo test"
+[tasks.install]
+description = "Build release binary and copy it to ~/.local/bin/bs"
+depends = ["build:release"]
+run = "mkdir -p ~/.local/bin && cp \"$(pwd)/target/release/bs\" ~/.local/bin/bs"
 
 [tasks."openspec:open"]
 description = "Render an OpenSpec proposal to HTML and open it in the browser"
@@ -28,6 +29,10 @@ arg "<change-id>" help="OpenSpec change ID to preview (e.g. my-feature)"
 complete "change-id" run="openspec list --json | jq -r '.changes[].name'"
 '''
 run = "scripts/view-proposal.sh ${usage_change_id?}"
+
+[tasks.test]
+description = "Run the cargo test suite"
+run = "rtk cargo test"
 
 [tools]
 lefthook = "latest"
