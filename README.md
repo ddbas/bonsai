@@ -32,4 +32,12 @@ $ bs help
 
 ## Install
 
-> **TBD** — installation instructions coming soon.
+**Prerequisites:** [mise](https://mise.jdx.dev/).
+
+```bash
+git clone https://github.com/ddbas/bonsai.git
+cd bonsai
+mise run install
+```
+
+Make sure `~/.local/bin` is on your `PATH`.
