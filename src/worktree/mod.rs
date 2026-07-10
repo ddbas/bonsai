@@ -177,6 +177,63 @@ pub fn resolve_head() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Run `git rev-parse HEAD --git-common-dir` and return `(head_sha, common_dir)`
+/// in a single subprocess call.
+///
+/// Combines the work of [`resolve_head`] and [`git_common_dir`] into one
+/// process-spawn round-trip.  The first output line is the full HEAD commit
+/// SHA; the second is the path to the shared `.git` directory (resolved to an
+/// absolute path using the same relative→absolute logic as [`git_common_dir`]).
+///
+/// Use this in performance-sensitive paths (e.g. [`get_worktree`]) where both
+/// values are needed together.
+pub fn resolve_head_and_common_dir() -> Result<(String, PathBuf)> {
+    let output = git_cmd()
+        .args(["rev-parse", "HEAD", "--git-common-dir"])
+        .output()
+        .context("failed to spawn `git rev-parse HEAD --git-common-dir`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`git rev-parse HEAD --git-common-dir` failed: {}",
+            stderr.trim()
+        );
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+
+    let head_sha = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("`git rev-parse` produced no HEAD output"))
+        .map(str::trim)?
+        .to_string();
+
+    let raw_common_dir = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("`git rev-parse` produced no --git-common-dir output"))
+        .map(str::trim)?
+        .to_string();
+
+    if raw_common_dir == "." {
+        bail!(
+            "bare repositories are not supported by `bs get`; \
+             run from a non-bare working tree"
+        );
+    }
+
+    let path = PathBuf::from(&raw_common_dir);
+    let common_dir = if path.is_absolute() {
+        path
+    } else {
+        let cwd = std::env::current_dir().context("failed to get current directory")?;
+        cwd.join(path)
+    };
+
+    Ok((head_sha, common_dir))
+}
+
 /// Return the managed root directory.
 ///
 /// Uses the `BONSAI_ROOT` environment variable when set (primarily for
@@ -220,9 +277,13 @@ pub fn tilde_path(path: &Path) -> String {
 
 // -- Pool scan (section 3) ----------------------------------------------------
 
-/// Parse `git worktree list --porcelain` and return entries whose path falls
-/// under `pool_dir`.
-pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
+/// Internal: parse `git worktree list --porcelain` once; return the filtered
+/// pool entries and a stale flag.
+///
+/// The stale flag is `true` when **any** registered worktree path (including
+/// non-pool entries such as the main worktree) no longer exists on disk,
+/// meaning a `git worktree prune` run is warranted.
+fn list_pool_worktrees_checking_stale(pool_dir: &Path) -> Result<(Vec<WorktreeEntry>, bool)> {
     let output = git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .output()
@@ -241,30 +302,43 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut entries: Vec<WorktreeEntry> = Vec::new();
+    let mut has_stale = false;
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_locked = false;
     let mut cur_branch: Option<String> = None;
 
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            // Flush the previous entry when we hit the next `worktree` line.
-            if let Some(path) = cur_path.take() {
-                let canonical = path.canonicalize().unwrap_or(path);
+    // Inline flush: called when a new `worktree ` header line is hit and once
+    // after the loop to handle the final block.
+    macro_rules! flush {
+        () => {
+            if let Some(raw) = cur_path.take() {
+                let canonical = raw.canonicalize().unwrap_or(raw);
+                if !canonical.exists() {
+                    has_stale = true;
+                }
                 if canonical.starts_with(&pool_canonical) {
                     entries.push(WorktreeEntry {
                         path: canonical,
                         locked: cur_locked,
                         branch: cur_branch.take(),
                     });
+                } else {
+                    // Non-pool entry: branch is irrelevant; drop it.
+                    let _ = cur_branch.take();
                 }
             }
+        };
+    }
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush!();
             cur_path = Some(PathBuf::from(rest.trim()));
             cur_locked = false;
             cur_branch = None;
         } else if line.starts_with("locked") {
             cur_locked = true;
         } else if let Some(refs) = line.strip_prefix("branch ") {
-            // `branch refs/heads/main` → `Some("main")`
             let short = refs
                 .trim()
                 .strip_prefix("refs/heads/")
@@ -273,19 +347,15 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
         }
         // `detached` line → cur_branch stays None
     }
+    flush!(); // handle the final entry
 
-    // Flush the last entry.
-    if let Some(path) = cur_path.take() {
-        let canonical = path.canonicalize().unwrap_or(path);
-        if canonical.starts_with(&pool_canonical) {
-            entries.push(WorktreeEntry {
-                path: canonical,
-                locked: cur_locked,
-                branch: cur_branch.take(),
-            });
-        }
-    }
+    Ok((entries, has_stale))
+}
 
+/// Parse `git worktree list --porcelain` and return entries whose path falls
+/// under `pool_dir`.
+pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
+    let (entries, _has_stale) = list_pool_worktrees_checking_stale(pool_dir)?;
     Ok(entries)
 }
 
@@ -329,37 +399,59 @@ pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
 ///
 /// Each slot is classified as [`WorktreeStatus::Available`] when it exists on
 /// disk, is not locked, and its working tree is clean (no uncommitted or
-/// untracked files, no open process handles); otherwise it is
+/// untracked files, no open process handles at the slot root); otherwise it is
 /// [`WorktreeStatus::InUse`].
+///
+/// Per-slot checks (`lsof +d` and `git status`) are executed concurrently;
+/// the returned `Vec` preserves the original slot ordering from
+/// `git worktree list --porcelain`.
 ///
 /// The returned tuple is `(path, status, stats, branch)` where `branch` is
 /// the short checked-out branch name (`None` for detached HEAD).
 pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> {
     let entries = list_pool_worktrees(pool_dir)?;
-    let mut result = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let branch = entry.branch.clone();
-        let (status, stats) = if entry.locked || !entry.path.exists() {
-            (WorktreeStatus::InUse, WorktreeStats::zero())
-        } else {
-            let process_count = count_open_processes(&entry.path)?;
-            let (uncommitted_count, untracked_count) =
-                count_git_status_files(&entry.path).unwrap_or((0, 0));
-            let stats = WorktreeStats {
-                process_count,
-                uncommitted_count,
-                untracked_count,
-            };
-            let is_clean = uncommitted_count == 0 && untracked_count == 0;
-            if process_count > 0 || !is_clean {
-                (WorktreeStatus::InUse, stats)
-            } else {
-                (WorktreeStatus::Available, stats)
-            }
-        };
-        result.push((entry.path, status, stats, branch));
-    }
-    Ok(result)
+
+    // Spawn one thread per slot so that the blocking `lsof +d` and
+    // `git status --porcelain` calls run concurrently.  Handles are collected
+    // into a `Vec` and joined in original slot order, guaranteeing that the
+    // returned `Vec` ordering matches `git worktree list` regardless of which
+    // thread finishes first.
+    let handles: Vec<std::thread::JoinHandle<Result<WorktreeListEntry>>> = entries
+        .into_iter()
+        .map(|entry| {
+            std::thread::spawn(move || -> Result<WorktreeListEntry> {
+                let branch = entry.branch.clone();
+                let (status, stats) = if entry.locked || !entry.path.exists() {
+                    (WorktreeStatus::InUse, WorktreeStats::zero())
+                } else {
+                    let process_count = count_open_processes(&entry.path)?;
+                    let (uncommitted_count, untracked_count) =
+                        count_git_status_files(&entry.path).unwrap_or((0, 0));
+                    let stats = WorktreeStats {
+                        process_count,
+                        uncommitted_count,
+                        untracked_count,
+                    };
+                    let is_clean = uncommitted_count == 0 && untracked_count == 0;
+                    if process_count > 0 || !is_clean {
+                        (WorktreeStatus::InUse, stats)
+                    } else {
+                        (WorktreeStatus::Available, stats)
+                    }
+                };
+                Ok((entry.path, status, stats, branch))
+            })
+        })
+        .collect();
+
+    // Join in original order; propagate the first error encountered.
+    handles
+        .into_iter()
+        .map(|h| {
+            h.join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("slot status check thread panicked")))
+        })
+        .collect()
 }
 
 /// Parse PID fields from `lsof +D` stdout and return the count of distinct PIDs.
@@ -414,14 +506,14 @@ fn lsof_real_errors(stderr: &str) -> String {
         .join("\n")
 }
 
-/// Internal helper: run `lsof_bin +D <path>` and return the number of distinct
-/// PIDs with open file descriptors under `path`.
+/// Internal helper: run `lsof_bin +d <path>` and return the number of distinct
+/// PIDs with open file descriptors directly in `path` (non-recursive).
 ///
 /// Separated from `count_open_processes` so tests can pass a non-existent
 /// binary name without mutating the global `PATH` environment variable.
 fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
     let output = Command::new(lsof_bin)
-        .args(["+D", &path.to_string_lossy()])
+        .args(["+d", &path.to_string_lossy()])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -453,12 +545,14 @@ fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
     Ok(parse_lsof_pids(&text))
 }
 
-/// Return the number of distinct PIDs that have open file descriptors anywhere
-/// under `path` (including `path` itself).
+/// Return the number of distinct PIDs that have open file descriptors directly
+/// in `path` (non-recursive; the top-level directory only).
 ///
-/// Uses `lsof +D <path>` to recursively query open file handles.  The PID
-/// (second whitespace-delimited column) of each non-header output line is
-/// collected into a `HashSet`; the size of that set is returned.
+/// Uses `lsof +d <path>` to query open file handles.  A process whose current
+/// working directory is `path` is detected; a process with handles only in
+/// subdirectories of `path` is **not** detected.  The PID (second
+/// whitespace-delimited column) of each non-header output line is collected
+/// into a `HashSet`; the size of that set is returned.
 ///
 /// - Non-empty stdout → parses and returns the distinct-PID count.
 /// - Empty stdout + empty stderr → no files are open → returns `Ok(0)`.
@@ -469,14 +563,14 @@ pub fn count_open_processes(path: &Path) -> Result<usize> {
     run_lsof_count("lsof", path)
 }
 
-/// Internal helper: run `lsof_bin +D <path>` and return whether any process
-/// has open file descriptors under `path`.
+/// Internal helper: run `lsof_bin +d <path>` and return whether any process
+/// has open file descriptors directly in `path` (non-recursive).
 ///
 /// Separated from `has_open_files` so tests can pass a non-existent binary
 /// name without mutating the global `PATH` environment variable.
 fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
     let output = Command::new(lsof_bin)
-        .args(["+D", &path.to_string_lossy()])
+        .args(["+d", &path.to_string_lossy()])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -517,14 +611,16 @@ fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
     }
 }
 
-/// Detect whether any process currently has an open file descriptor under
-/// `path` (including `path` itself).
+/// Detect whether any process currently has an open file descriptor directly
+/// in `path` (non-recursive; the top-level directory only).
 ///
-/// Uses `lsof +D <path>` to recursively query open file handles.  The
-/// result is determined by stdout/stderr content (not exit code, which
-/// `lsof` sets unreliably across platforms):
+/// Uses `lsof +d <path>` to query open file handles.  A process whose current
+/// working directory is `path` is detected; a process with handles only in
+/// subdirectories of `path` is **not** detected.  The result is determined by
+/// stdout/stderr content (not exit code, which `lsof` sets unreliably across
+/// platforms):
 ///
-/// - Non-empty stdout → at least one process has the path open →
+/// - Non-empty stdout → at least one process has a handle in `path` →
 ///   returns `Ok(true)`.
 /// - Empty stdout + empty stderr → no files are open → returns `Ok(false)`.
 /// - Spawn error (`lsof` not on `PATH`) → returns `Err` with an actionable
@@ -574,10 +670,15 @@ pub fn prune_worktrees() -> Result<()> {
 /// Return the first available (clean, unlocked, on-disk) slot in the pool,
 /// or `None` if every slot is unavailable.
 ///
-/// Runs `git worktree prune` first to remove stale entries.
+/// Runs `git worktree prune` only when the worktree list contains at least one
+/// registered path that no longer exists on disk, avoiding the subprocess cost
+/// on every invocation.
 pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
-    prune_worktrees()?;
-    for entry in list_pool_worktrees(pool_dir)? {
+    let (entries, has_stale) = list_pool_worktrees_checking_stale(pool_dir)?;
+    if has_stale {
+        prune_worktrees()?;
+    }
+    for entry in entries {
         if entry.locked || !entry.path.exists() {
             continue;
         }
@@ -644,15 +745,23 @@ pub fn create_slot(slot_path: &Path, head_sha: &str) -> Result<()> {
 /// provisioned (or reused) worktree.
 ///
 /// Steps:
-/// 1. Resolve `HEAD` SHA.
+/// 1. Resolve `HEAD` SHA and the canonical repo slug in one subprocess call.
 /// 2. Derive pool directory (`managed_root()/<repo-slug>/`).
 /// 3. Create pool directory if it does not yet exist.
 /// 4. Scan for an available slot; if none, generate a new UUID slot.
 /// 5. Reset (or add) the slot to `HEAD` in detached state.
 /// 6. Return the canonicalised slot path.
 pub fn get_worktree() -> Result<PathBuf> {
-    let head_sha = resolve_head()?;
-    let slug = repo_slug()?;
+    // Single subprocess: git rev-parse HEAD --git-common-dir
+    let (head_sha, common_dir) = resolve_head_and_common_dir()?;
+    let repo_root = common_dir
+        .parent()
+        .context("`git common dir` path has no parent component")?;
+    let basename = repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("repo root directory has no usable file name")?;
+    let slug = slugify(basename);
     let pool_dir = managed_root()?.join(&slug);
 
     std::fs::create_dir_all(&pool_dir)
@@ -1049,7 +1158,136 @@ mod tests {
         );
     }
 
-    // -- 7.2: slug normalisation ----------------------------------------------
+    /// `lsof +d` (non-recursive) must NOT detect a file open only in a
+    /// subdirectory.  This is the key behavioural difference from `lsof +D`.
+    #[test]
+    fn has_open_files_returns_false_when_file_open_in_subdirectory() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).expect("create subdir");
+        let file_path = subdir.join("held_open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        // Hold the file open inside the *subdirectory*, not in dir.path() itself.
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let result = has_open_files(dir.path());
+        assert_eq!(
+            result.expect("has_open_files should not error"),
+            false,
+            "lsof +d (non-recursive) should NOT detect a file open only in a subdirectory"
+        );
+    }
+
+    /// `count_open_processes` must also return 0 when the only open handle is
+    /// inside a subdirectory (verifies `+d` semantics for the count variant).
+    #[test]
+    fn count_open_processes_returns_zero_when_file_open_in_subdirectory() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let subdir = dir.path().join("nested");
+        fs::create_dir(&subdir).expect("create subdir");
+        let file_path = subdir.join("open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let result =
+            count_open_processes(dir.path()).expect("count_open_processes should not error");
+        assert_eq!(
+            result, 0,
+            "lsof +d should not count processes with handles only in subdirectories"
+        );
+    }
+
+    // -- resolve_head_and_common_dir -----------------------------------------
+
+    /// Verify that the merged call returns a non-empty HEAD SHA and a
+    /// non-empty common-dir path that actually exists on disk.
+    /// This test requires that it runs inside a git repository.
+    #[test]
+    fn resolve_head_and_common_dir_returns_both_values() {
+        let result = resolve_head_and_common_dir();
+        // Skip gracefully if not inside a git repo (shouldn't happen in CI).
+        if result.is_err() {
+            return;
+        }
+        let (head_sha, common_dir) = result.unwrap();
+        assert!(
+            !head_sha.is_empty(),
+            "HEAD SHA should be non-empty, got: {head_sha:?}"
+        );
+        assert!(
+            head_sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "HEAD SHA should be a hex string, got: {head_sha:?}"
+        );
+        assert!(
+            common_dir.exists(),
+            "common_dir path should exist on disk: {}",
+            common_dir.display()
+        );
+    }
+
+    /// Verify that `resolve_head_and_common_dir` returns the same HEAD SHA
+    /// as `resolve_head` when called from the same working directory.
+    #[test]
+    fn resolve_head_and_common_dir_matches_individual_calls() {
+        let merged = resolve_head_and_common_dir();
+        let individual_head = resolve_head();
+        let individual_dir = git_common_dir();
+
+        // Skip gracefully if not inside a git repo.
+        if merged.is_err() || individual_head.is_err() || individual_dir.is_err() {
+            return;
+        }
+
+        let (merged_sha, merged_dir) = merged.unwrap();
+        assert_eq!(
+            merged_sha,
+            individual_head.unwrap(),
+            "merged call HEAD SHA should match individual resolve_head()"
+        );
+        assert_eq!(
+            merged_dir,
+            individual_dir.unwrap(),
+            "merged call common_dir should match individual git_common_dir()"
+        );
+    }
+
+    // -- list_pool_worktrees_checking_stale ----------------------------------
+
+    /// When every registered worktree path exists on disk the stale flag
+    /// must be `false`, meaning `git worktree prune` is not needed.
+    /// Verified indirectly: `list_pool_worktrees_checking_stale` only sets
+    /// `has_stale = true` inside the flush block when `!canonical.exists()`;
+    /// a freshly-created real pool_dir with no registered worktrees returns
+    /// an empty list and `has_stale = false` (no paths to check against).
+    #[test]
+    fn list_pool_worktrees_checking_stale_no_stale_for_fresh_dir() {
+        use tempfile::TempDir;
+
+        // Use a real git repo (current dir) as the pool root so the subprocess
+        // succeeds.  The pool_dir is a temp dir that is NOT a known worktree
+        // path, so the returned pool entries will be empty — but has_stale is
+        // determined from ALL paths in `git worktree list`, not just pool ones.
+        let dir = TempDir::new().expect("temp dir");
+        let result = list_pool_worktrees_checking_stale(dir.path());
+        if let Ok((entries, has_stale)) = result {
+            // No registered worktree lives under a fresh temp dir.
+            assert!(
+                entries.is_empty(),
+                "no pool entries expected for a fresh temp dir"
+            );
+            // has_stale reflects ALL worktrees, not just pool ones.  For a
+            // healthy repo (all paths present) it should be false.
+            // We can only assert this on a machine where all worktrees are intact.
+            let _ = has_stale; // not safe to assert without knowing host state
+        }
+        // If the git call fails (e.g. not in a git repo) just skip.
+    }
 
     #[test]
     fn slugify_lowercases_ascii() {

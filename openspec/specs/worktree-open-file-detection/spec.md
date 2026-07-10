@@ -1,26 +1,44 @@
 ## Purpose
 
-Provide a `has_open_files` helper that detects whether any process currently
-holds open file descriptors inside a managed worktree pool slot directory,
-enabling safe availability classification before a slot is reused.
+Provide `has_open_files` and `count_open_processes` helpers that detect whether
+any process currently holds open file descriptors in the top-level directory of
+a managed worktree pool slot, enabling safe availability classification before a
+slot is reused.
 
 ## Requirements
 
-### Requirement: `has_open_files` detects open file handles inside a slot directory
+### Requirement: `has_open_files` detects open file handles in the top-level slot directory
 
 The system SHALL provide a `has_open_files(path: &Path) -> Result<bool>`
-function in the `worktree` module. The function SHALL run `lsof +D <path>` and
-return `true` when at least one process has an open file descriptor anywhere
-inside `path` (including `path` itself), and `false` when no process does.
+function in the `worktree` module. The function SHALL run `lsof +d <path>`
+(non-recursive, top-level directory only) and return `true` when at least one
+process has an open file descriptor **directly in** `path` (including processes
+whose current working directory is `path`), and `false` when no process does.
 
-#### Scenario: Process has file open inside directory
+The function SHALL NOT scan files in subdirectories of `path`. A process with
+only open file descriptors in subdirectories of `path` (but not in `path`
+itself) SHALL NOT cause `has_open_files` to return `true`.
 
-- **WHEN** at least one process has an open file descriptor under `path`
+#### Scenario: Shell has slot directory as CWD
+
+- **WHEN** a shell process has its current working directory set to `path`
 - **THEN** `has_open_files` SHALL return `Ok(true)`
+
+#### Scenario: Process has file open directly in slot directory
+
+- **WHEN** at least one process has an open file descriptor to a file located
+  directly inside `path` (not in a subdirectory)
+- **THEN** `has_open_files` SHALL return `Ok(true)`
+
+#### Scenario: Process has file open only in subdirectory
+
+- **WHEN** a process has an open file descriptor only in a subdirectory of
+  `path` (e.g. `<path>/src/main.rs`) and no open handle in `path` itself
+- **THEN** `has_open_files` SHALL return `Ok(false)`
 
 #### Scenario: No process has files open
 
-- **WHEN** no process has any open file descriptor under `path`
+- **WHEN** no process has any open file descriptor in `path`
 - **THEN** `has_open_files` SHALL return `Ok(false)`
 
 ### Requirement: `lsof` absence causes the CLI to exit with a hard error
@@ -50,17 +68,28 @@ rather than "no matches".
 - **WHEN** `lsof` exits non-zero and writes to stderr
 - **THEN** `has_open_files` SHALL return an `Err` value
 
-### Requirement: A slot with open file handles is classified as `InUse`
+### Requirement: A slot with open file handles at the slot root is classified as `InUse`
 
 `list_worktrees_status` and `find_available_slot` SHALL treat a slot as
 `WorktreeStatus::InUse` when `has_open_files` returns `Ok(true)` for that slot,
 even if the slot is otherwise unlocked and has a clean working tree.
 
-#### Scenario: Editor has slot file open
+A process whose open handles are only in subdirectories of the slot root SHALL
+NOT trigger the `InUse` classification via `has_open_files`.
+
+#### Scenario: Shell is cd'd to slot root
 
 - **WHEN** a slot is unlocked, clean, and exists on disk
-- **WHEN** an editor process has a file in that slot open
+- **WHEN** a shell process has CWD = the slot root directory
 - **THEN** the slot SHALL be classified as `WorktreeStatus::InUse`
+
+#### Scenario: Process has handle only in subdirectory
+
+- **WHEN** a slot is unlocked, clean, and exists on disk
+- **WHEN** a process has an open file descriptor only in a subdirectory of the
+  slot
+- **THEN** `has_open_files` SHALL return `Ok(false)` and the slot SHALL NOT be
+  classified as `InUse` on that basis alone
 
 ### Requirement: A slot with no open file handles may still be classified as `Available`
 
@@ -69,9 +98,10 @@ even if the slot is otherwise unlocked and has a clean working tree.
 on disk, not git-locked, working tree is clean, and `has_open_files` returns
 `Ok(false)`.
 
-#### Scenario: Clean unlocked slot with no open handles
+#### Scenario: Clean unlocked slot with no open handles at root
 
-- **WHEN** a slot is unlocked, clean, exists on disk, and no process has it open
+- **WHEN** a slot is unlocked, clean, exists on disk, and no process has a
+  handle directly in its root directory
 - **THEN** the slot SHALL be classified as `WorktreeStatus::Available`
 
 ### Requirement: `has_open_files` errors propagate as hard failures
@@ -94,27 +124,40 @@ CLI MUST stop and report the problem.
 - **THEN** `has_open_files` SHALL return `Err`
 - **THEN** the CLI SHALL propagate the error and exit non-zero
 
-### Requirement: `count_open_processes` returns the number of distinct PIDs with open handles
+### Requirement: `count_open_processes` returns the number of distinct PIDs with open handles in the top-level slot directory
 
 The system SHALL provide a `count_open_processes(path: &Path) -> Result<usize>`
-function in the `worktree` module. The function SHALL run `lsof +D <path>`,
-parse the PID field (second whitespace-delimited column) from each non-header
-output line, deduplicate the PIDs, and return the count. It SHALL return `0`
-when `lsof` exits with no matches (exit code 1, empty stdout).
+function in the `worktree` module. The function SHALL run `lsof +d <path>`
+(non-recursive), parse the PID field (second whitespace-delimited column) from
+each non-header output line, deduplicate the PIDs, and return the count. It
+SHALL return `0` when `lsof` exits with no matches.
 
-#### Scenario: Multiple file descriptors from one process
+The function SHALL NOT count processes that have open handles only in
+subdirectories of `path`.
 
-- **WHEN** `lsof +D <path>` lists three rows all with the same PID
+#### Scenario: Shell is cd'd to slot root
+
+- **WHEN** exactly one shell process has CWD = `path`
 - **THEN** `count_open_processes` SHALL return `Ok(1)`
 
-#### Scenario: Multiple distinct processes
+#### Scenario: Multiple file descriptors from one process in top-level dir
 
-- **WHEN** `lsof +D <path>` lists rows with PIDs 100, 200, and 100
+- **WHEN** `lsof +d <path>` lists three rows all with the same PID
+- **THEN** `count_open_processes` SHALL return `Ok(1)`
+
+#### Scenario: Multiple distinct processes with top-level handles
+
+- **WHEN** `lsof +d <path>` lists rows with PIDs 100, 200, and 100
 - **THEN** `count_open_processes` SHALL return `Ok(2)`
 
-#### Scenario: No open file handles
+#### Scenario: No open file handles in top-level dir
 
-- **WHEN** `lsof` exits with code 1 and empty stdout
+- **WHEN** `lsof +d` reports no matches
+- **THEN** `count_open_processes` SHALL return `Ok(0)`
+
+#### Scenario: Process only has files in subdirectory
+
+- **WHEN** a process has an open handle only at `<path>/src/main.rs`
 - **THEN** `count_open_processes` SHALL return `Ok(0)`
 
 #### Scenario: `lsof` not found
@@ -122,41 +165,3 @@ when `lsof` exits with no matches (exit code 1, empty stdout).
 - **WHEN** `lsof` is not present on `PATH`
 - **THEN** `count_open_processes` SHALL return `Err` whose message names `lsof`
   as the missing dependency
-
-### Requirement: `list_worktrees_status` exposes per-slot process count
-
-`list_worktrees_status` SHALL return
-`Vec<(PathBuf, WorktreeStatus, Option<usize>)>`. The third element SHALL be
-`Some(n)` where `n > 0` when `count_open_processes` returns a positive count for
-that slot (regardless of whether the working tree is also dirty), and `None` in
-all other cases (available, locked, dirty-with-no-open-handles, or when `lsof`
-returns an error that is propagated). The dirty flag SHALL NOT suppress the
-process count — a slot that is both dirty and has open file handles SHALL expose
-`Some(n)`.
-
-#### Scenario: Available slot has `None` count
-
-- **WHEN** a slot is `WorktreeStatus::Available`
-- **THEN** the process-count element SHALL be `None`
-
-#### Scenario: Locked slot has `None` count
-
-- **WHEN** a slot is `WorktreeStatus::InUse` because it is git-locked
-- **THEN** the process-count element SHALL be `None`
-
-#### Scenario: Dirty slot with no open handles has `None` count
-
-- **WHEN** a slot has uncommitted changes AND `count_open_processes` returns `0`
-- **THEN** the process-count element SHALL be `None`
-
-#### Scenario: Dirty slot with open handles has `Some(n)` count
-
-- **WHEN** a slot has uncommitted changes AND `count_open_processes` returns
-  `n > 0`
-- **THEN** the process-count element SHALL be `Some(n)`
-
-#### Scenario: Clean open-file slot has `Some(n)` count
-
-- **WHEN** a slot is `WorktreeStatus::InUse` because `count_open_processes`
-  returned `n > 0` and the working tree is clean
-- **THEN** the process-count element SHALL be `Some(n)`
