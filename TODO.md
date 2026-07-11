@@ -5,6 +5,8 @@
 - [ ] `enter` subcommand: `cd` into a worktree
   - [ ] `--enter` option on `get` subcommand: `bs --enter` and `bs get --enter`
         should `cd` into the worktree after getting it
+- [ ] `-b` and `-B` options on `get` subcommand: create a new branch when
+      getting a worktree
 - [ ] `config` subcommand: manage bonsai configuration directly in git
       (`[bonsai]` section).
   - [ ] Delegate to `git config` for all reads and writes. Include `--global`
