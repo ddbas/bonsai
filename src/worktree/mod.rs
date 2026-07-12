@@ -102,8 +102,11 @@ pub type WorktreeListEntry = (PathBuf, WorktreeStatus, WorktreeStats, Option<Str
 pub enum WorktreeStatus {
     /// Slot exists on disk, is not locked, and its working tree is clean.
     Available,
-    /// Slot is locked or has uncommitted changes.
+    /// Slot has uncommitted changes, untracked files, or open process handles,
+    /// and is not git-locked.
     InUse,
+    /// Slot is git-locked (via `git worktree lock`); takes priority over `InUse`.
+    Locked,
 }
 
 /// Controls whether and how a branch is created inside the provisioned slot.
@@ -435,8 +438,20 @@ pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> 
         .map(|entry| {
             std::thread::spawn(move || -> Result<WorktreeListEntry> {
                 let branch = entry.branch.clone();
-                let (status, stats) = if entry.locked || !entry.path.exists() {
+                let (status, stats) = if !entry.path.exists() {
                     (WorktreeStatus::InUse, WorktreeStats::zero())
+                } else if entry.locked {
+                    // Always classify as Locked regardless of dirty/open-process
+                    // signals; stats are still collected so they appear in `bs list`.
+                    let process_count = count_open_processes(&entry.path)?;
+                    let (uncommitted_count, untracked_count) =
+                        count_git_status_files(&entry.path).unwrap_or((0, 0));
+                    let stats = WorktreeStats {
+                        process_count,
+                        uncommitted_count,
+                        untracked_count,
+                    };
+                    (WorktreeStatus::Locked, stats)
                 } else {
                     let process_count = count_open_processes(&entry.path)?;
                     let (uncommitted_count, untracked_count) =
@@ -681,6 +696,79 @@ pub fn prune_worktrees() -> Result<()> {
     Ok(())
 }
 
+/// Lock a bonsai-managed pool slot using `git worktree lock`.
+///
+/// Forwards `reason` verbatim to `--reason` when supplied.  The slot must
+/// already be registered as a git worktree.  Git surfaces its own error if
+/// the slot is already locked or not a worktree.
+pub fn lock_worktree(path: &Path, reason: Option<&str>) -> Result<()> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?;
+
+    let output = if let Some(msg) = reason {
+        git_cmd()
+            .args(["worktree", "lock", "--reason", msg, path_str])
+            .output()
+            .context("failed to spawn `git worktree lock`")?
+    } else {
+        git_cmd()
+            .args(["worktree", "lock", path_str])
+            .output()
+            .context("failed to spawn `git worktree lock`")?
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`git worktree lock` failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// Unlock a bonsai-managed pool slot using `git worktree unlock`.
+///
+/// Git surfaces its own error if the slot is not currently locked or not a
+/// worktree.
+pub fn unlock_worktree(path: &Path) -> Result<()> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?;
+
+    let output = git_cmd()
+        .args(["worktree", "unlock", path_str])
+        .output()
+        .context("failed to spawn `git worktree unlock`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`git worktree unlock` failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// Verify that `path` is a bonsai-managed pool slot under `pool_dir`.
+///
+/// Returns an error when:
+/// - `path` does not exist on disk, or
+/// - `path` (after canonicalization) does not fall under `pool_dir`.
+pub fn validate_pool_slot(path: &Path, pool_dir: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("path does not exist: {}", path.display());
+    }
+    let pool_canonical = pool_dir
+        .canonicalize()
+        .unwrap_or_else(|_| pool_dir.to_path_buf());
+    let path_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !path_canonical.starts_with(&pool_canonical) {
+        bail!(
+            "{} is not a bonsai-managed pool slot (pool directory: {})",
+            path.display(),
+            pool_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Return the first available (clean, unlocked, on-disk) slot in the pool,
 /// or `None` if every slot is unavailable.
 ///
@@ -908,10 +996,25 @@ mod tests {
     /// `list_worktrees_status` directly (which needs git on PATH and a real
     /// pool dir).
     #[test]
-    fn status_locked_is_in_use() {
+    fn status_locked_clean_is_locked() {
         let (status, stats) = synthetic_status(true, true, 0, 0, 0);
-        assert_eq!(status, WorktreeStatus::InUse);
+        assert_eq!(status, WorktreeStatus::Locked);
         assert_eq!(stats.process_count, 0);
+        assert_eq!(stats.uncommitted_count, 0);
+    }
+
+    #[test]
+    fn status_locked_dirty_is_locked() {
+        let (status, stats) = synthetic_status(true, true, 3, 0, 0);
+        assert_eq!(status, WorktreeStatus::Locked);
+        assert_eq!(stats.uncommitted_count, 3);
+    }
+
+    #[test]
+    fn status_locked_with_open_processes_is_locked() {
+        let (status, stats) = synthetic_status(true, true, 0, 0, 2);
+        assert_eq!(status, WorktreeStatus::Locked);
+        assert_eq!(stats.process_count, 2);
     }
 
     #[test]
@@ -967,8 +1070,15 @@ mod tests {
         untracked: usize,
         open_count: usize,
     ) -> (WorktreeStatus, WorktreeStats) {
-        if locked || !exists {
+        if !exists {
             (WorktreeStatus::InUse, WorktreeStats::zero())
+        } else if locked {
+            let stats = WorktreeStats {
+                process_count: open_count,
+                uncommitted_count: uncommitted,
+                untracked_count: untracked,
+            };
+            (WorktreeStatus::Locked, stats)
         } else {
             let stats = WorktreeStats {
                 process_count: open_count,
@@ -1451,6 +1561,46 @@ mod tests {
         let a = new_slot_path(&pool);
         let b = new_slot_path(&pool);
         assert_ne!(a, b, "successive slot paths should differ");
+    }
+
+    // -- validate_pool_slot --------------------------------------------------
+
+    #[test]
+    fn validate_pool_slot_accepts_valid_path() {
+        use tempfile::TempDir;
+        let pool = TempDir::new().expect("temp pool dir");
+        let slot = pool.path().join("a3f9c1b2");
+        std::fs::create_dir(&slot).expect("create slot dir");
+        assert!(
+            validate_pool_slot(&slot, pool.path()).is_ok(),
+            "a path directly under pool_dir should be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_pool_slot_rejects_path_outside_pool() {
+        use tempfile::TempDir;
+        let pool = TempDir::new().expect("temp pool dir");
+        let other = TempDir::new().expect("temp other dir");
+        let err = validate_pool_slot(other.path(), pool.path())
+            .expect_err("path outside pool should be rejected");
+        assert!(
+            err.to_string().contains("not a bonsai-managed pool slot"),
+            "error should mention pool slot, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_pool_slot_rejects_nonexistent_path() {
+        use tempfile::TempDir;
+        let pool = TempDir::new().expect("temp pool dir");
+        let nonexistent = pool.path().join("does-not-exist");
+        let err = validate_pool_slot(&nonexistent, pool.path())
+            .expect_err("nonexistent path should be rejected");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "error should mention 'does not exist', got: {err}"
+        );
     }
 
     // -- find_slot_for_cwd ----------------------------------------------------
