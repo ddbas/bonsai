@@ -14,8 +14,10 @@ one.
 **Goals:**
 
 - Accept `-b <branch>` and `-B <branch>` on `bs get` at the CLI level.
-- After provisioning the slot (reuse or create), run the appropriate
-  `git checkout -b`/`-B` command inside the slot.
+- For **new** slots: use `git worktree add -b|-B <branch> <slot_path> <sha>` so
+  the branch is set up in a single subprocess, with no separate checkout step.
+- For **reused** slots: replace `git checkout --detach <sha>` with
+  `git checkout -b|-B <branch> <sha>` directly, again avoiding a separate step.
 - Print the branch name in the output line alongside the slot path.
 - Keep all existing behaviour unchanged when neither flag is given.
 
@@ -50,18 +52,34 @@ simultaneously, but the library API should also reflect it.
 **Alternative considered**: `Option<(BranchKind, String)>` (a single optional
 field) is equivalent but slightly more verbose at call sites.
 
-### Decision: Extend `get_worktree` with an `Option<BranchMode>` parameter
+### Decision: Extend `get_worktree` with an `Option<BranchMode>` parameter; pass it into `create_slot` and `reset_slot`
 
-Add `branch: Option<BranchMode>` to `get_worktree`. When `Some`, after the slot
-is provisioned (reset or created), run `git -C <slot> checkout -b|-B <name>`.
+Add `branch: Option<BranchMode>` to `get_worktree`, `create_slot`, and
+`reset_slot`. Each function selects the right git flag based on the mode:
 
-**Rationale**: keeps all git orchestration inside `worktree/mod.rs`; `main.rs`
-only parses the CLI flags and passes the mode down. This mirrors how
-`reset_slot` and `create_slot` are already called.
+- `create_slot` with `Some(BranchMode::New(b))` →
+  `git worktree add -b <b> <slot> <sha>`
+- `create_slot` with `Some(BranchMode::Reset(b))` →
+  `git worktree add -B <b> <slot> <sha>`
+- `create_slot` with `None` → `git worktree add --detach <slot> <sha>`
+  (unchanged)
+- `reset_slot` with `Some(BranchMode::New(b))` →
+  `git -C <slot> checkout -b <b> <sha>`
+- `reset_slot` with `Some(BranchMode::Reset(b))` →
+  `git -C <slot> checkout -B <b> <sha>`
+- `reset_slot` with `None` → `git -C <slot> checkout --detach <sha>` (unchanged)
 
-**Alternative considered**: handle branch checkout entirely in `main.rs`. This
-scatters git subprocess logic outside the module boundary and breaks the
-existing separation of concerns.
+**Rationale**: `git worktree add` natively supports `-b`/`-B`, so using them
+avoids a redundant subprocess for the new-slot path. For reused slots,
+`git checkout -b|-B <branch> <sha>` is equally atomic — no separate detach step
+is needed. Keeping the branch mode threaded through the helpers preserves the
+existing separation of concerns: all git subprocess logic stays in
+`worktree/mod.rs`; `main.rs` only maps CLI flags to `BranchMode`.
+
+**Alternative considered**: provision the slot unconditionally in detached HEAD
+then run a separate `git checkout -b|-B`. This works but wastes a subprocess on
+the new-slot path and is strictly worse — `git worktree add` already does the
+job in one call.
 
 ### Decision: Reuse an available slot regardless of branch flag
 
@@ -95,8 +113,9 @@ Clap enforces mutual exclusion; both `new_branch` and `reset_branch` being
 
 - **Pool reuse of a previously-branched slot**: Reusing a slot that had a branch
   checked out and is now "available" (clean working tree, no open files) is safe
-  — `get_worktree` resets to detached HEAD before the branch checkout runs. →
-  _Existing `reset_slot` call handles this correctly._
+  — `reset_slot` runs `git checkout -b|-B <branch> <sha>` (or `--detach <sha>`)
+  which moves the slot to the new state in one step regardless of its prior
+  HEAD. → _`reset_slot` handles this correctly for all three modes._
 
 - **Default command (`bs` with no args) cannot forward flags**: `bs -b foo` will
   not work; the user must use `bs get -b foo`. This is an acceptable limitation

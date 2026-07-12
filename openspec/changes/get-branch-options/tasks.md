@@ -2,15 +2,16 @@
 
 - [ ] 1.1 Add `BranchMode` enum (`New(String)` / `Reset(String)`) to
       `src/worktree/mod.rs` with `pub` visibility
-- [ ] 1.2 Add
-      `checkout_branch(slot_path: &Path, mode: &BranchMode) -> Result<()>`
-      helper that runs `git -C <slot> checkout -b|-B <name>` and surfaces git's
-      error message on failure
-- [ ] 1.3 Update `get_worktree` signature to
-      `get_worktree(branch: Option<BranchMode>) -> Result<PathBuf>` and call
-      `checkout_branch` after slot provisioning when `branch` is `Some`
-- [ ] 1.4 Add unit tests for `checkout_branch` logic (verify correct git flag
-      for each variant) — use `GitEnv` container helper
+- [ ] 1.2 Extend `create_slot(slot_path, head_sha, branch: Option<&BranchMode>)`
+      to pass `-b <name>` or `-B <name>` to `git worktree add` instead of
+      `--detach` when `branch` is `Some`; `None` behaviour unchanged
+- [ ] 1.3 Extend `reset_slot(slot_path, head_sha, branch: Option<&BranchMode>)`
+      to run `git checkout -b|-B <name> <sha>` instead of
+      `git checkout --detach <sha>` when `branch` is `Some`; `None` unchanged
+- [ ] 1.4 Update `get_worktree(branch: Option<BranchMode>)` to thread the mode
+      through to `create_slot` and `reset_slot`
+- [ ] 1.5 Add unit / integration tests for the new `create_slot` and
+      `reset_slot` branch paths — use `GitEnv` container helper
 
 ## 2. CLI — `-b` / `-B` arguments on `bs get`
 
