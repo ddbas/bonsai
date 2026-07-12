@@ -10,7 +10,7 @@ mod common;
 
 use std::path::PathBuf as _;
 
-use common::{GitEnv, host_git, path_from_output, worktree_head};
+use common::{GitEnv, branch_from_output, host_git, path_from_output, worktree_head};
 
 // ── lsof missing: hard error ──────────────────────────────────────────────────
 
@@ -324,4 +324,194 @@ async fn get_output_contains_tree_emoji() {
         stdout.contains('🌳'),
         "stdout should contain the 🌳 emoji; got: {stdout:?}"
     );
+}
+
+// ── -b: creates new branch in fresh slot ─────────────────────────────────────
+
+#[tokio::test]
+async fn get_b_creates_new_branch() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "my-feature"])
+        .output()
+        .expect("spawn bs get -b");
+    assert!(
+        out.status.success(),
+        "bs get -b should succeed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let slot = path_from_output(&out.stdout);
+    assert!(slot.exists(), "slot must exist on disk");
+
+    // Slot should be on the requested branch, not detached HEAD.
+    let branch = current_branch(&slot);
+    assert_eq!(branch, "my-feature", "slot should be on branch my-feature");
+
+    // Branch name should appear in stdout.
+    let shown = branch_from_output(&out.stdout);
+    assert_eq!(
+        shown.as_deref(),
+        Some("my-feature"),
+        "stdout should include the branch name; got: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+// ── -b: reused slot also ends up on the requested branch ─────────────────────
+
+#[tokio::test]
+async fn get_b_reused_slot_gets_branch() {
+    let env = GitEnv::new().await;
+
+    // Provision one slot so the pool is non-empty.
+    let slot1 = env.run_get();
+
+    // Reuse that slot with -b.
+    let out = env
+        .bs()
+        .args(["get", "-b", "reuse-branch"])
+        .output()
+        .expect("spawn bs get -b (reuse)");
+    assert!(
+        out.status.success(),
+        "bs get -b on reused slot should succeed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let slot2 = path_from_output(&out.stdout);
+    assert_eq!(slot1, slot2, "existing clean slot should be reused");
+    assert_eq!(current_branch(&slot2), "reuse-branch");
+}
+
+// ── -b: fails when branch already exists ─────────────────────────────────────
+
+#[tokio::test]
+async fn get_b_fails_if_branch_exists() {
+    let env = GitEnv::new().await;
+
+    // Create the branch in the repo (container exec, no checkout).
+    env.git(&["branch", "existing-branch"]).await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "existing-branch"])
+        .output()
+        .expect("spawn bs get -b existing");
+
+    assert!(
+        !out.status.success(),
+        "bs get -b should fail when branch already exists"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("existing-branch"),
+        "stderr should name the conflicting branch; got: {stderr:?}"
+    );
+}
+
+// ── -B: creates branch when it does not exist ─────────────────────────────────
+
+#[tokio::test]
+async fn get_B_creates_fresh_branch() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-B", "new-branch"])
+        .output()
+        .expect("spawn bs get -B");
+    assert!(
+        out.status.success(),
+        "bs get -B should succeed for a new branch\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let slot = path_from_output(&out.stdout);
+    assert_eq!(current_branch(&slot), "new-branch");
+
+    let shown = branch_from_output(&out.stdout);
+    assert_eq!(shown.as_deref(), Some("new-branch"));
+}
+
+// ── -B: resets existing branch to current HEAD ───────────────────────────────
+
+#[tokio::test]
+async fn get_B_resets_existing_branch() {
+    let env = GitEnv::new().await;
+
+    // Create a branch at the initial commit (before we advance HEAD).
+    env.git(&["branch", "to-reset"]).await;
+
+    // Advance HEAD so the branch is now behind.
+    env.make_commit("second.txt", "v2").await;
+    let new_head = env.head_sha();
+
+    let out = env
+        .bs()
+        .args(["get", "-B", "to-reset"])
+        .output()
+        .expect("spawn bs get -B reset");
+    assert!(
+        out.status.success(),
+        "bs get -B should succeed when branch already exists\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let slot = path_from_output(&out.stdout);
+    assert_eq!(current_branch(&slot), "to-reset");
+    assert_eq!(
+        worktree_head(&slot),
+        new_head,
+        "branch should be reset to the new HEAD"
+    );
+}
+
+// ── no flags: slot stays in detached HEAD (regression guard) ─────────────────
+
+#[tokio::test]
+async fn get_without_flags_is_detached_head() {
+    let env = GitEnv::new().await;
+    let slot = env.run_get();
+
+    // `git symbolic-ref HEAD` exits non-zero for detached HEAD.
+    let out = host_git(&slot, &["symbolic-ref", "--short", "HEAD"]);
+    assert!(
+        !out.status.success(),
+        "slot should be in detached HEAD state, but symbolic-ref succeeded: {}",
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+
+    // path_from_output should still work (no branch suffix).
+    let re_out = env.bs().arg("get").output().expect("spawn");
+    assert!(branch_from_output(&re_out.stdout).is_none());
+}
+
+// ── -b and -B together are rejected by clap ───────────────────────────────────
+
+#[tokio::test]
+async fn get_b_and_B_together_are_rejected() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "foo", "-B", "bar"])
+        .output()
+        .expect("spawn bs get -b foo -B bar");
+
+    assert!(
+        !out.status.success(),
+        "supplying both -b and -B should exit non-zero"
+    );
+}
+
+// ── Local helpers ─────────────────────────────────────────────────────────────
+
+/// Return the short branch name of the worktree at `dir`, or `"HEAD"` for
+/// detached HEAD (mirrors `git rev-parse --abbrev-ref HEAD` output).
+fn current_branch(dir: &std::path::Path) -> String {
+    let out = host_git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

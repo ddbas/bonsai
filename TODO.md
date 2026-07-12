@@ -2,8 +2,6 @@
 
 - [ ] `lock` & `unlock` subcommand: lock and unlock a worktree (with an optional
       reason)
-- [ ] `-b` and `-B` options on `get` subcommand: create a new branch when
-      getting a worktree
 - [ ] `config` subcommand: manage bonsai configuration directly in git
       (`[bonsai]` section).
   - [ ] Delegate to `git config` for all reads and writes. Include `--global`

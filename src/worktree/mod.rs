@@ -106,6 +106,20 @@ pub enum WorktreeStatus {
     InUse,
 }
 
+/// Controls whether and how a branch is created inside the provisioned slot.
+///
+/// Passed to [`get_worktree`], [`create_slot`], and [`reset_slot`] to select
+/// the appropriate `git worktree add` / `git checkout` flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchMode {
+    /// Create a new branch (`-b`). Fails if the branch already exists,
+    /// mirroring `git checkout -b` semantics.
+    New(String),
+    /// Create or reset a branch (`-B`). Overwrites an existing branch without
+    /// error, mirroring `git checkout -B` semantics.
+    Reset(String),
+}
+
 // -- Core utilities (section 2) -----------------------------------------------
 
 /// Run `git rev-parse --git-common-dir` and return the path.
@@ -695,43 +709,57 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
 
 // -- Provision (section 4) ----------------------------------------------------
 
-/// Reset an existing slot to detached HEAD at `head_sha`.
+/// Reset an existing slot to `head_sha`, optionally checking out a branch.
 ///
-/// Runs `git -C <slot> checkout --detach <head_sha>`.
-pub fn reset_slot(slot_path: &Path, head_sha: &str) -> Result<()> {
-    let output = git_cmd()
-        .args([
-            "-C",
-            &slot_path.to_string_lossy(),
-            "checkout",
-            "--detach",
-            head_sha,
-        ])
-        .output()
-        .context("failed to spawn `git checkout --detach`")?;
+/// - `branch = None` → `git -C <slot> checkout --detach <head_sha>` (detached HEAD)
+/// - `branch = Some(BranchMode::New(b))` → `git -C <slot> checkout -b <b> <head_sha>`
+/// - `branch = Some(BranchMode::Reset(b))` → `git -C <slot> checkout -B <b> <head_sha>`
+pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>) -> Result<()> {
+    let slot_str = slot_path.to_string_lossy();
+    let output = match branch {
+        None => git_cmd()
+            .args(["-C", &slot_str, "checkout", "--detach", head_sha])
+            .output()
+            .context("failed to spawn `git checkout --detach`")?,
+        Some(BranchMode::New(name)) => git_cmd()
+            .args(["-C", &slot_str, "checkout", "-b", name, head_sha])
+            .output()
+            .context("failed to spawn `git checkout -b`")?,
+        Some(BranchMode::Reset(name)) => git_cmd()
+            .args(["-C", &slot_str, "checkout", "-B", name, head_sha])
+            .output()
+            .context("failed to spawn `git checkout -B`")?,
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("`git checkout --detach` failed: {}", stderr.trim());
+        bail!("`git checkout` failed: {}", stderr.trim());
     }
 
     Ok(())
 }
 
-/// Create a new worktree slot at `slot_path` in detached HEAD state.
+/// Create a new worktree slot at `slot_path`.
 ///
-/// Runs `git worktree add --detach <slot_path> <head_sha>`.
-pub fn create_slot(slot_path: &Path, head_sha: &str) -> Result<()> {
-    let output = git_cmd()
-        .args([
-            "worktree",
-            "add",
-            "--detach",
-            &slot_path.to_string_lossy(),
-            head_sha,
-        ])
-        .output()
-        .context("failed to spawn `git worktree add --detach`")?;
+/// - `branch = None` → `git worktree add --detach <slot_path> <head_sha>`
+/// - `branch = Some(BranchMode::New(b))` → `git worktree add -b <b> <slot_path> <head_sha>`
+/// - `branch = Some(BranchMode::Reset(b))` → `git worktree add -B <b> <slot_path> <head_sha>`
+pub fn create_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>) -> Result<()> {
+    let slot_str = slot_path.to_string_lossy();
+    let output = match branch {
+        None => git_cmd()
+            .args(["worktree", "add", "--detach", &slot_str, head_sha])
+            .output()
+            .context("failed to spawn `git worktree add --detach`")?,
+        Some(BranchMode::New(name)) => git_cmd()
+            .args(["worktree", "add", "-b", name, &slot_str, head_sha])
+            .output()
+            .context("failed to spawn `git worktree add -b`")?,
+        Some(BranchMode::Reset(name)) => git_cmd()
+            .args(["worktree", "add", "-B", name, &slot_str, head_sha])
+            .output()
+            .context("failed to spawn `git worktree add -B`")?,
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -749,9 +777,13 @@ pub fn create_slot(slot_path: &Path, head_sha: &str) -> Result<()> {
 /// 2. Derive pool directory (`managed_root()/<repo-slug>/`).
 /// 3. Create pool directory if it does not yet exist.
 /// 4. Scan for an available slot; if none, generate a new UUID slot.
-/// 5. Reset (or add) the slot to `HEAD` in detached state.
+/// 5. Reset (or add) the slot to `HEAD`, checking out `branch` when provided.
 /// 6. Return the canonicalised slot path.
-pub fn get_worktree() -> Result<PathBuf> {
+///
+/// When `branch` is `None` the slot is left in detached HEAD state (existing
+/// behaviour). Pass `Some(BranchMode::New(…))` or `Some(BranchMode::Reset(…))`
+/// to have the slot checked out on a named branch in a single git subprocess.
+pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
     // Single subprocess: git rev-parse HEAD --git-common-dir
     let (head_sha, common_dir) = resolve_head_and_common_dir()?;
     let repo_root = common_dir
@@ -777,12 +809,12 @@ pub fn get_worktree() -> Result<PathBuf> {
 
     let slot_path = match find_available_slot(&pool_dir)? {
         Some(existing) => {
-            reset_slot(&existing, &head_sha)?;
+            reset_slot(&existing, &head_sha, branch.as_ref())?;
             existing
         }
         None => {
             let new_slot = new_slot_path(&pool_dir);
-            create_slot(&new_slot, &head_sha)?;
+            create_slot(&new_slot, &head_sha, branch.as_ref())?;
             new_slot
         }
     };
@@ -1201,6 +1233,42 @@ mod tests {
             result, 0,
             "lsof +d should not count processes with handles only in subdirectories"
         );
+    }
+
+    // -- BranchMode -----------------------------------------------------------
+
+    #[test]
+    fn branch_mode_new_holds_name() {
+        let m = BranchMode::New("feature".to_string());
+        if let BranchMode::New(name) = m {
+            assert_eq!(name, "feature");
+        } else {
+            panic!("expected New variant");
+        }
+    }
+
+    #[test]
+    fn branch_mode_reset_holds_name() {
+        let m = BranchMode::Reset("hotfix".to_string());
+        if let BranchMode::Reset(name) = m {
+            assert_eq!(name, "hotfix");
+        } else {
+            panic!("expected Reset variant");
+        }
+    }
+
+    #[test]
+    fn branch_mode_new_and_reset_are_distinct() {
+        let a = BranchMode::New("x".to_string());
+        let b = BranchMode::Reset("x".to_string());
+        assert_ne!(a, b, "New and Reset with the same name must not be equal");
+    }
+
+    #[test]
+    fn branch_mode_clone() {
+        let orig = BranchMode::New("cloned".to_string());
+        let copy = orig.clone();
+        assert_eq!(orig, copy);
     }
 
     // -- resolve_head_and_common_dir -----------------------------------------

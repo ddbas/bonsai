@@ -343,10 +343,31 @@ impl GitEnv {
 
 /// Parse the worktree path from `bs get` stdout.
 ///
-/// stdout format: `🌳 /absolute/path/to/slot\n`
+/// stdout formats:
+/// - `🌳 /absolute/path/to/slot\n`  (detached HEAD)
+/// - `🌳 /absolute/path/to/slot  (branch-name)\n`  (branch mode)
 pub fn path_from_output(raw: &[u8]) -> PathBuf {
     let text = String::from_utf8_lossy(raw);
-    PathBuf::from(text.trim().trim_start_matches('🌳').trim())
+    let s = text.trim().trim_start_matches('🌳').trim();
+    // Strip optional "  (branch-name)" suffix.
+    let path_str = if let Some(idx) = s.find("  (") {
+        &s[..idx]
+    } else {
+        s
+    };
+    PathBuf::from(path_str)
+}
+
+/// Parse the branch name from `bs get -b/-B` stdout.
+///
+/// Returns `None` when the output has no `  (branch-name)` suffix
+/// (i.e. detached HEAD mode).
+pub fn branch_from_output(raw: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let s = text.trim().trim_start_matches('🌳').trim();
+    s.find("  (")
+        .and_then(|start| s[start + 3..].strip_suffix(')'))
+        .map(|b| b.to_string())
 }
 
 /// HEAD SHA of the worktree at `path`.
