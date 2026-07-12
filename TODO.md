@@ -13,3 +13,5 @@
   - [ ] Optional and dynamic sized worktree argument to prune only specified
         worktrees
   - [ ] `--force` option to prune "in use" worktrees
+- [ ] `prime` subcommand: a markdown output that agents can read to understand
+      how to use bonsai
