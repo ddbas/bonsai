@@ -52,6 +52,16 @@ enum Commands {
     #[command(alias = "ls")]
     List,
 
+    /// Show the managed worktree slot that contains the current directory.
+    ///
+    /// Prints the tilde-abbreviated path of the bonsai pool slot that the
+    /// current working directory lives inside, together with the checked-out
+    /// branch name when applicable.
+    ///
+    /// Exits with status 0 when inside a managed slot; exits with status 1
+    /// when the CWD is not part of any managed slot for this repository.
+    Current,
+
     /// Show usage information.
     Help,
 }
@@ -68,6 +78,13 @@ fn format_stats(stats: &worktree::WorktreeStats) -> String {
         parts.push(format!("?{}", stats.untracked_count));
     }
     parts.join(" ")
+}
+
+fn format_current_path(tilde: &str, branch: Option<&str>) -> String {
+    match branch {
+        Some(b) => format!("{tilde}  ({})", b.bold()),
+        None => tilde.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +167,24 @@ mod tests {
         let pad_long = " ".repeat(max - w_long);
         // Both rows should have path + pad of the same total length.
         assert_eq!(short.len() + pad_short.len(), long.len() + pad_long.len());
+    }
+
+    // -- format_current_path -------------------------------------------------
+
+    #[test]
+    fn format_current_path_no_branch() {
+        let result = format_current_path("~/.bonsai/repo/a3f9c1b2", None);
+        assert_eq!(result, "~/.bonsai/repo/a3f9c1b2");
+    }
+
+    #[test]
+    fn format_current_path_with_branch() {
+        // Strip ANSI codes for comparison — bold() wraps with escape sequences.
+        let result = format_current_path("~/.bonsai/repo/a3f9c1b2", Some("my-feature"));
+        // The result must contain the path and the branch in parentheses.
+        assert!(result.contains("~/.bonsai/repo/a3f9c1b2"));
+        assert!(result.contains("my-feature"));
+        assert!(result.contains('(') && result.contains(')'));
     }
 }
 
@@ -279,6 +314,18 @@ fn run() -> anyhow::Result<()> {
                 }
             }
         }
+
+        Some(Commands::Current) => match worktree::current_worktree()? {
+            Some((path, branch)) => {
+                let tilde = worktree::tilde_path(&path);
+                println!("🌳 {}", format_current_path(&tilde, branch.as_deref()));
+            }
+            None => {
+                println!("Not inside a managed bonsai worktree.");
+                println!("Run `bs get` to provision a slot, then `cd` into it.");
+                std::process::exit(1);
+            }
+        },
 
         Some(Commands::Help) => {
             Cli::command().print_long_help()?;

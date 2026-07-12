@@ -824,6 +824,48 @@ pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
         .with_context(|| format!("failed to canonicalize slot path {}", slot_path.display()))
 }
 
+// -- Current worktree detection (section 5) ---------------------------------
+
+/// Internal helper: find which pool slot (if any) `cwd` is inside.
+///
+/// Returns `Ok(None)` immediately when `pool_dir` does not exist on disk
+/// (no error).  Otherwise scans pool entries and returns the first whose
+/// path is an ancestor of `cwd`.
+fn find_slot_for_cwd(cwd: &Path, pool_dir: &Path) -> Result<Option<(PathBuf, Option<String>)>> {
+    if !pool_dir.exists() {
+        return Ok(None);
+    }
+    // Canonicalise once so symlink-resolved paths compare correctly
+    // (e.g. macOS /tmp → /private/tmp).
+    let pool_dir = pool_dir
+        .canonicalize()
+        .unwrap_or_else(|_| pool_dir.to_path_buf());
+    let entries = list_pool_worktrees(&pool_dir)?;
+    for entry in entries {
+        if cwd.starts_with(&entry.path) {
+            return Ok(Some((entry.path, entry.branch)));
+        }
+    }
+    Ok(None)
+}
+
+/// Return the managed pool slot that contains the current working directory,
+/// or `Ok(None)` when the CWD is not inside any managed slot (including when
+/// no pool directory exists yet).
+///
+/// Steps:
+/// 1. Resolve and canonicalise the process CWD.
+/// 2. Derive the pool directory from [`managed_root`] and [`repo_slug`].
+/// 3. Delegate to [`find_slot_for_cwd`].
+pub fn current_worktree() -> Result<Option<(PathBuf, Option<String>)>> {
+    let cwd = std::env::current_dir()
+        .context("failed to get current directory")?
+        .canonicalize()
+        .context("failed to canonicalize current directory")?;
+    let pool_dir = managed_root()?.join(repo_slug()?);
+    find_slot_for_cwd(&cwd, &pool_dir)
+}
+
 // -- Unit Tests ---------------------------------------------------------------
 
 #[cfg(test)]
@@ -1409,5 +1451,52 @@ mod tests {
         let a = new_slot_path(&pool);
         let b = new_slot_path(&pool);
         assert_ne!(a, b, "successive slot paths should differ");
+    }
+
+    // -- find_slot_for_cwd ----------------------------------------------------
+
+    /// When the pool directory does not exist on disk, `find_slot_for_cwd`
+    /// MUST return `Ok(None)` without error.
+    #[test]
+    fn find_slot_for_cwd_returns_none_for_absent_pool() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let nonexistent = PathBuf::from("/nonexistent/bonsai-pool-path-xyz");
+        let result =
+            find_slot_for_cwd(&cwd, &nonexistent).expect("absent pool dir should not error");
+        assert!(result.is_none(), "absent pool dir should return None");
+    }
+
+    /// When the CWD is a subdirectory of a registered pool slot,
+    /// `find_slot_for_cwd` MUST return `Ok(Some((slot_path, branch)))` where
+    /// `slot_path` is an ancestor of `cwd`.
+    #[test]
+    fn find_slot_for_cwd_matches_slot_ancestor() {
+        // We need a real pool dir that git worktree list will include.
+        // Use the pool dir of the current repo (if it exists).
+        let Ok(root) = managed_root() else { return };
+        let Ok(slug) = repo_slug() else { return };
+        let pool_dir = root.join(&slug);
+        if !pool_dir.exists() {
+            return; // pool not provisioned on this machine; skip
+        }
+        // List the first slot and pretend our CWD is inside it.
+        let Ok(entries) = list_pool_worktrees(&pool_dir) else {
+            return;
+        };
+        let Some(entry) = entries.into_iter().next() else {
+            return;
+        };
+        let fake_cwd = entry.path.join("src"); // subdirectory
+        let result =
+            find_slot_for_cwd(&fake_cwd, &pool_dir).expect("find_slot_for_cwd should not error");
+        assert!(
+            result.is_some(),
+            "CWD inside a slot subtree should be detected"
+        );
+        let (found_path, _branch) = result.unwrap();
+        assert!(
+            fake_cwd.starts_with(&found_path),
+            "returned path should be an ancestor of the fake CWD"
+        );
     }
 }
