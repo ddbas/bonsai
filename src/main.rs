@@ -21,12 +21,29 @@ enum Commands {
     /// Provision or reuse a managed git worktree from the pool.
     ///
     /// Resolves the current HEAD, finds a clean unlocked slot under
-    /// ~/.bonsai/<repo>/ (or creates one), resets it to that HEAD in
-    /// detached state, and prints the absolute path to stdout.
+    /// ~/.bonsai/<repo>/ (or creates one), resets it to that HEAD, and
+    /// prints the absolute path to stdout.
+    ///
+    /// Use `-b <branch>` to create a new branch at HEAD inside the slot
+    /// (fails if the branch already exists, mirroring `git checkout -b`).
+    /// Use `-B <branch>` to create or reset a branch (mirroring
+    /// `git checkout -B`). Without either flag the slot is left in detached
+    /// HEAD state.
     ///
     /// This is also the default command: running `bs` with no subcommand
-    /// is equivalent to `bs get`.
-    Get,
+    /// is equivalent to `bs get` (always detached HEAD; `-b`/`-B` require
+    /// the explicit `get` subcommand).
+    Get {
+        /// Create a new branch at HEAD in the provisioned slot.
+        /// Fails if the branch already exists (mirrors `git checkout -b`).
+        #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "reset_branch")]
+        new_branch: Option<String>,
+
+        /// Create or reset a branch at HEAD in the provisioned slot.
+        /// Overwrites an existing branch without error (mirrors `git checkout -B`).
+        #[arg(short = 'B', value_name = "BRANCH", conflicts_with = "new_branch")]
+        reset_branch: Option<String>,
+    },
 
     /// List all managed worktrees in the pool with their availability status.
     ///
@@ -147,10 +164,32 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        // Default command (no subcommand) and explicit `bs get` both go here.
-        None | Some(Commands::Get) => {
-            let path = worktree::get_worktree()?;
+        // Default command (no subcommand): always detached HEAD.
+        // The -b/-B flags require the explicit `bs get` subcommand.
+        None => {
+            let path = worktree::get_worktree(None)?;
             println!("🌳 {}", path.display());
+        }
+
+        // Explicit `bs get` with optional -b/-B branch flags.
+        Some(Commands::Get {
+            new_branch,
+            reset_branch,
+        }) => {
+            let branch = match (new_branch, reset_branch) {
+                (Some(b), None) => Some(worktree::BranchMode::New(b)),
+                (None, Some(b)) => Some(worktree::BranchMode::Reset(b)),
+                _ => None,
+            };
+            // Capture the name before moving `branch` into get_worktree.
+            let branch_name: Option<String> = branch.as_ref().map(|m| match m {
+                worktree::BranchMode::New(b) | worktree::BranchMode::Reset(b) => b.clone(),
+            });
+            let path = worktree::get_worktree(branch)?;
+            match branch_name.as_deref() {
+                Some(b) => println!("🌳 {}  ({})", path.display(), b),
+                None => println!("🌳 {}", path.display()),
+            }
         }
 
         Some(Commands::List) => {
