@@ -7,7 +7,6 @@
   - [ ] Delegate to `git config` for all reads and writes. Include `--global`
         and `--local` flags.
 - [ ] Show current worktree in `list` subcommand
-- [ ] `current` subcommand: show the current worktree
 - [ ] `prune` subcommand
   - [ ] Reset the `HEAD` of all "available" worktrees to the `HEAD` of `main`
   - [ ] Optional and dynamic sized worktree argument to prune only specified

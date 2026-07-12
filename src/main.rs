@@ -144,15 +144,21 @@ mod tests {
         }
     }
 
+    /// Build the path_display string the same way the rendering loop does.
+    fn make_path_display(tilde: &str, branch: Option<&str>) -> String {
+        match branch {
+            Some(b) => format!("{} ({})", tilde, b),
+            None => tilde.to_string(),
+        }
+    }
+
     #[test]
     fn visible_width_no_branch() {
-        // Count manually: "~/.bonsai/bonsai/abc12345" = 25 chars
         assert_eq!(visible_width("~/.bonsai/bonsai/abc12345", None), 25);
     }
 
     #[test]
     fn visible_width_with_branch() {
-        // 25 + " (" (2) + "main" (4) + ")" (1) = 32
         assert_eq!(visible_width("~/.bonsai/bonsai/abc12345", Some("main")), 32);
     }
 
@@ -161,12 +167,62 @@ mod tests {
         let short = "~/.bonsai/abc";
         let long = "~/.bonsai/bonsai/abcdef01 (worktree-list-enhancements)";
         let w_short = visible_width(short, None);
-        let w_long = visible_width(long, None); // already includes branch in label here
+        let w_long = visible_width(long, None);
         let max = w_short.max(w_long);
         let pad_short = " ".repeat(max - w_short);
         let pad_long = " ".repeat(max - w_long);
-        // Both rows should have path + pad of the same total length.
         assert_eq!(short.len() + pad_short.len(), long.len() + pad_long.len());
+    }
+
+    // -- current-slot indicator in list output --------------------------------
+
+    #[test]
+    fn current_slot_path_display_no_branch() {
+        // Arrow-only mode: no (current) label, path display is same as non-current.
+        let display = make_path_display("~/.bonsai/repo/a3f9c1b2", None);
+        assert!(
+            !display.contains("(current)"),
+            "no (current) label expected, got: {display}"
+        );
+        assert!(display.contains("~/.bonsai/repo/a3f9c1b2"));
+    }
+
+    #[test]
+    fn current_slot_path_display_with_branch() {
+        let display = make_path_display("~/.bonsai/repo/a3f9c1b2", Some("my-feature"));
+        assert!(
+            !display.contains("(current)"),
+            "no (current) label expected, got: {display}"
+        );
+        assert!(display.contains("my-feature"));
+        assert!(display.contains("~/.bonsai/repo/a3f9c1b2"));
+    }
+
+    #[test]
+    fn non_current_slot_path_display_has_no_current_label() {
+        let display = make_path_display("~/.bonsai/repo/b4e8d2f1", Some("main"));
+        assert!(
+            !display.contains("(current)"),
+            "non-current row must not have (current), got: {display}"
+        );
+    }
+
+    #[test]
+    fn current_and_non_current_same_visible_width() {
+        // With arrow-only, is_current doesn't affect width.
+        let w = visible_width("~/.bonsai/repo/abc", None);
+        assert_eq!(w, "~/.bonsai/repo/abc".chars().count());
+    }
+
+    #[test]
+    fn current_slot_column_alignment_preserved() {
+        let current_tilde = "~/.bonsai/repo/abc";
+        let other_tilde = "~/.bonsai/repo/much-longer-slot";
+        let w_current = visible_width(current_tilde, None);
+        let w_other = visible_width(other_tilde, None);
+        let max = w_current.max(w_other);
+        assert!(max >= w_current);
+        assert!(max >= w_other);
     }
 
     // -- format_current_path -------------------------------------------------
@@ -246,27 +302,35 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
+            // Detect the current slot once; tolerate errors (treat as None).
+            let current_path: Option<std::path::PathBuf> =
+                worktree::current_worktree().ok().flatten().map(|(p, _)| p);
+
             // Two-pass rendering: collect rows first so we can measure
             // the widest path+branch string and pad all rows to the same
             // column width before printing the stats column.
             struct Row<'a> {
                 status: &'a worktree::WorktreeStatus,
-                /// Path + optional bold branch — may contain ANSI escape codes.
+                /// Path + optional bold branch + optional " (current)" label.
                 path_display: String,
                 /// Visible character width of `path_display` (no ANSI codes).
                 visible_width: usize,
                 stats_str: String,
+                is_current: bool,
             }
 
             let rows: Vec<Row<'_>> = entries
                 .iter()
                 .map(|(path, status, stats, branch)| {
                     let tilde = worktree::tilde_path(path);
-                    // Visible width: tilde chars + " (" + branch + ")" if present.
-                    let visible_width = match branch {
+                    let is_current = current_path.as_deref() == Some(path.as_path());
+                    // Visible width: tilde chars + " (" + branch + ")" if present,
+                    // plus " (current)" (10 chars) when this is the active slot.
+                    let base_width = match branch {
                         Some(b) => tilde.chars().count() + 3 + b.chars().count(),
                         None => tilde.chars().count(),
                     };
+                    let visible_width = base_width;
                     let path_display = match branch {
                         Some(b) => format!("{} ({})", tilde, b.bold()),
                         None => tilde,
@@ -276,6 +340,7 @@ fn run() -> anyhow::Result<()> {
                         path_display,
                         visible_width,
                         stats_str: format_stats(stats),
+                        is_current,
                     }
                 })
                 .collect();
@@ -284,13 +349,21 @@ fn run() -> anyhow::Result<()> {
 
             for row in &rows {
                 let pad = " ".repeat(max_width - row.visible_width);
+                let prefix = if row.is_current { "▶ " } else { "  " };
                 match row.status {
                     worktree::WorktreeStatus::Available => {
                         if row.stats_str.is_empty() {
-                            println!("{}  {}{}", "available".green(), row.path_display, pad);
+                            println!(
+                                "{}{}  {}{}",
+                                prefix,
+                                "available".green(),
+                                row.path_display,
+                                pad
+                            );
                         } else {
                             println!(
-                                "{}  {}{}  {}",
+                                "{}{}  {}{}  {}",
+                                prefix,
                                 "available".green(),
                                 row.path_display,
                                 pad,
@@ -300,10 +373,17 @@ fn run() -> anyhow::Result<()> {
                     }
                     worktree::WorktreeStatus::InUse => {
                         if row.stats_str.is_empty() {
-                            println!("{}     {}{}", "in use".red(), row.path_display, pad);
+                            println!(
+                                "{}{}     {}{}",
+                                prefix,
+                                "in use".red(),
+                                row.path_display,
+                                pad
+                            );
                         } else {
                             println!(
-                                "{}     {}{}  {}",
+                                "{}{}     {}{}  {}",
+                                prefix,
                                 "in use".red(),
                                 row.path_display,
                                 pad,

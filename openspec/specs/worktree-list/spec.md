@@ -34,6 +34,10 @@ contain:
 4. A compact usage-stats column that shows only non-zero values for: open
    processes (`⚙N`), uncommitted files (`±N`), and untracked files (`?N`),
    space-separated. The column is blank for clean idle slots.
+5. When the slot is the one that contains the process's current working
+   directory, the line SHALL be prefixed with `▶` so that the active slot is
+   visually distinct from the rest. All other lines SHALL retain their existing
+   format with a two-space indent in place of the arrow.
 
 #### Scenario: Single available worktree, detached HEAD
 
@@ -70,6 +74,32 @@ contain:
 - **WHEN** the pool contains multiple slots in different states
 - **THEN** each slot SHALL appear on its own line with the correct badge, path,
   optional branch, and stats column
+
+#### Scenario: Current slot is marked in the list
+
+- **WHEN** the user runs `bs list` from inside a managed pool slot (e.g.
+  `~/.bonsai/repo/a3f9c1b2`)
+- **THEN** the row for that slot SHALL be prefixed with `▶`
+- **THEN** all other rows SHALL appear with a two-space indent in place of the
+  arrow
+
+#### Scenario: Current slot subdirectory is still detected
+
+- **WHEN** the user runs `bs list` from a subdirectory inside a managed pool
+  slot (e.g. `~/.bonsai/repo/a3f9c1b2/src`)
+- **THEN** the row for the containing slot SHALL be prefixed with `▶`
+
+#### Scenario: CWD is not inside any managed slot
+
+- **WHEN** the user runs `bs list` from a directory that is not inside any
+  managed pool slot
+- **THEN** no row SHALL be prefixed with `▶`
+
+#### Scenario: `current_worktree()` fails gracefully
+
+- **WHEN** `current_worktree()` returns an error (e.g. git unavailable)
+- **THEN** `bs list` SHALL still display all slots without a current indicator,
+  without producing an error
 
 ### Requirement: Available status means clean, unlocked, and not opened by any process at the slot root
 
