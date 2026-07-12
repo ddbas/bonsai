@@ -14,3 +14,5 @@
   - [ ] `--force` option to prune "in use" worktrees
 - [ ] `prime` subcommand: a markdown output that agents can read to understand
       how to use bonsai
+- [ ] `--global` option for `list` subcommand: list all worktrees across all
+      repositories
