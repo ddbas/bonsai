@@ -12,13 +12,6 @@ to `git worktree unlock`, making the slot available for reuse by `bs get`.
 - **THEN** the slot SHALL be unlocked via `git worktree unlock <path>` and
   `bs get` SHALL consider it available (if otherwise clean)
 
-#### Scenario: Unlock slot by 8-char UUID slug
-
-- **WHEN** the user runs `bs unlock a3f9c1b2` where `a3f9c1b2` is a locked slot
-  in the pool
-- **THEN** the slot at `~/.bonsai/<repo-slug>/a3f9c1b2` SHALL be unlocked via
-  `git worktree unlock`
-
 #### Scenario: Unlock slot by absolute path
 
 - **WHEN** the user runs `bs unlock /home/user/.bonsai/repo/a3f9c1b2` where that
@@ -27,8 +20,8 @@ to `git worktree unlock`, making the slot available for reuse by `bs get`.
 
 ### Requirement: Reject non-pool targets
 
-The `bs unlock` subcommand SHALL error with a clear message when the resolved
-path is not a bonsai-managed pool slot for the current repository.
+The `bs unlock` subcommand SHALL error with a clear message when the given path
+is not a bonsai-managed pool slot for the current repository.
 
 #### Scenario: Path outside pool directory
 
@@ -36,17 +29,10 @@ path is not a bonsai-managed pool slot for the current repository.
 - **THEN** `bs unlock` SHALL exit with a non-zero status and print an error
   naming the pool directory
 
-#### Scenario: Unknown slug
-
-- **WHEN** the user runs `bs unlock xxxxxxxx` with a slug that does not match
-  any slot
-- **THEN** `bs unlock` SHALL exit with a non-zero status and print an error
-  indicating the slot was not found
-
 ### Requirement: Default to current slot
 
 The `bs unlock` subcommand SHALL use the slot containing the current working
-directory when no path or slug argument is provided.
+directory when no path argument is provided.
 
 #### Scenario: No argument outside a managed slot
 
