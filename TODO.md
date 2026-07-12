@@ -1,7 +1,5 @@
 # TODO
 
-- [ ] `lock` & `unlock` subcommand: lock and unlock a worktree (with an optional
-      reason)
 - [ ] `config` subcommand: manage bonsai configuration directly in git
       (`[bonsai]` section).
   - [ ] Delegate to `git config` for all reads and writes. Include `--global`

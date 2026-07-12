@@ -64,6 +64,31 @@ enum Commands {
 
     /// Show usage information.
     Help,
+
+    /// Lock a bonsai pool slot, preventing `bs get` from reusing it.
+    ///
+    /// Locks the target slot via `git worktree lock`. Defaults to the current
+    /// slot when no path argument is supplied. An optional `--reason` string
+    /// is forwarded verbatim to git.
+    Lock {
+        /// Human-readable reason stored with the lock (forwarded to git).
+        #[arg(long, value_name = "MESSAGE")]
+        reason: Option<String>,
+
+        /// Absolute path to the pool slot to lock.
+        /// Defaults to the current slot when omitted.
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// Unlock a bonsai pool slot, making it available for reuse by `bs get`.
+    ///
+    /// Unlocks the target slot via `git worktree unlock`. Defaults to the
+    /// current slot when no path argument is supplied.
+    Unlock {
+        /// Absolute path to the pool slot to unlock.
+        /// Defaults to the current slot when omitted.
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 fn format_stats(stats: &worktree::WorktreeStats) -> String {
@@ -351,6 +376,26 @@ fn run() -> anyhow::Result<()> {
                 let pad = " ".repeat(max_width - row.visible_width);
                 let prefix = if row.is_current { "▶ " } else { "  " };
                 match row.status {
+                    worktree::WorktreeStatus::Locked => {
+                        if row.stats_str.is_empty() {
+                            println!(
+                                "{}{}     {}{}",
+                                prefix,
+                                "locked".yellow(),
+                                row.path_display,
+                                pad
+                            );
+                        } else {
+                            println!(
+                                "{}{}     {}{}  {}",
+                                prefix,
+                                "locked".yellow(),
+                                row.path_display,
+                                pad,
+                                row.stats_str
+                            );
+                        }
+                    }
                     worktree::WorktreeStatus::Available => {
                         if row.stats_str.is_empty() {
                             println!(
@@ -409,6 +454,48 @@ fn run() -> anyhow::Result<()> {
 
         Some(Commands::Help) => {
             Cli::command().print_long_help()?;
+        }
+
+        Some(Commands::Lock { reason, path }) => {
+            let root = worktree::managed_root()?;
+            let slug = worktree::repo_slug()?;
+            let pool_dir = root.join(&slug);
+
+            let target = match path {
+                Some(p) => p,
+                None => match worktree::current_worktree()? {
+                    Some((p, _)) => p,
+                    None => anyhow::bail!(
+                        "not inside a managed bonsai pool slot; \
+                         please provide a path argument"
+                    ),
+                },
+            };
+
+            worktree::validate_pool_slot(&target, &pool_dir)?;
+            worktree::lock_worktree(&target, reason.as_deref())?;
+            println!("\u{1f512} locked {}", worktree::tilde_path(&target));
+        }
+
+        Some(Commands::Unlock { path }) => {
+            let root = worktree::managed_root()?;
+            let slug = worktree::repo_slug()?;
+            let pool_dir = root.join(&slug);
+
+            let target = match path {
+                Some(p) => p,
+                None => match worktree::current_worktree()? {
+                    Some((p, _)) => p,
+                    None => anyhow::bail!(
+                        "not inside a managed bonsai pool slot; \
+                         please provide a path argument"
+                    ),
+                },
+            };
+
+            worktree::validate_pool_slot(&target, &pool_dir)?;
+            worktree::unlock_worktree(&target)?;
+            println!("\u{1f513} unlocked {}", worktree::tilde_path(&target));
         }
     }
 
