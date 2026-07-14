@@ -168,7 +168,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bosai"
+name = "bonsai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
