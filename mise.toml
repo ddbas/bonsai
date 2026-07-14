@@ -4,13 +4,13 @@ enter = "lefthook install"
 [tasks.build]
 description = "Build the cargo project"
 run = "rtk cargo build"
-sources = ["Cargo.toml", "src/**/*.rs"]
+sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
 outputs = ["target/debug/bs"]
 
 [tasks."build:release"]
 description = "Build the cargo project in release mode"
 run = "rtk cargo build --release"
-sources = ["Cargo.toml", "src/**/*.rs"]
+sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
 outputs = ["target/release/bs"]
 
 [tasks.dev]
@@ -21,6 +21,7 @@ run = "cargo run"
 description = "Build release binary and copy it to ~/.local/bin/bs"
 depends = ["build:release"]
 run = "mkdir -p ~/.local/bin && cp \"$(pwd)/target/release/bs\" ~/.local/bin/bs"
+outputs = ["~/.local/bin/bs"]
 
 [tasks."openspec:open"]
 description = "Render an OpenSpec proposal to HTML and open it in the browser"
@@ -33,6 +34,7 @@ run = "scripts/view-proposal.sh ${usage_change_id?}"
 [tasks.test]
 description = "Run the cargo test suite"
 run = "rtk cargo test"
+sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs"]
 
 [tools]
 lefthook = "latest"
