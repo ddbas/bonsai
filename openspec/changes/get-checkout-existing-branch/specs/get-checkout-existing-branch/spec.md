@@ -18,36 +18,42 @@ reset; it SHALL already exist in the repository.
 - **THEN** stdout SHALL contain `🌳` followed by the slot path and the branch
   name
 
-### Requirement: Non-existent branch is rejected before slot provisioning
+### Requirement: Non-existent branch is rejected
 
 `bs get <branch>` SHALL exit with a non-zero status and print an actionable
-error message, and SHALL NOT provision, reset, or create a slot, when the branch
-named in the positional argument does not exist anywhere in the repository.
+error message, and SHALL NOT leave a slot reset or a new worktree registered,
+when the branch named in the positional argument does not exist anywhere in the
+repository. This SHALL be enforced by the underlying `git checkout` /
+`git worktree add` call failing naturally (git already refuses to check out a
+non-existent branch); `bs get` SHALL NOT perform a separate existence check
+before attempting the checkout.
 
 #### Scenario: Branch does not exist
 
 - **WHEN** the user runs `bs get no-such-branch`
 - **AND** no branch named `no-such-branch` exists in the repository
 - **THEN** the command SHALL exit with a non-zero status
-- **THEN** stderr SHALL contain an actionable error message naming
-  `no-such-branch`
+- **THEN** stderr SHALL contain git's own error message naming `no-such-branch`
 - **THEN** no worktree slot SHALL be created or reset
 
 ### Requirement: Branch already checked out elsewhere is rejected
 
 `bs get <branch>` SHALL exit with a non-zero status and print an actionable
-error message identifying the conflicting worktree path, mirroring
-`git worktree add`'s own "already checked out" failure, when the named branch is
-already checked out in another worktree (managed by the bonsai pool or not). No
-slot SHALL be provisioned, reset, or created for this invocation.
+error message identifying the conflicting worktree path, when the named branch
+is already checked out in another worktree (managed by the bonsai pool or not).
+This SHALL be enforced by the underlying `git checkout` / `git worktree add`
+call failing naturally (both commands already refuse to check out a branch that
+is checked out in another worktree); `bs get` SHALL NOT perform a separate
+already-checked-out check before attempting the checkout. No slot SHALL be left
+reset or newly registered for this invocation.
 
 #### Scenario: Branch checked out in another managed slot
 
 - **WHEN** the user runs `bs get shared-branch`
 - **AND** `shared-branch` is currently checked out in another bonsai pool slot
 - **THEN** the command SHALL exit with a non-zero status
-- **THEN** stderr SHALL contain an actionable error message identifying the path
-  of the worktree that already has `shared-branch` checked out
+- **THEN** stderr SHALL contain git's own error message identifying the path of
+  the worktree that already has `shared-branch` checked out
 - **THEN** no new slot SHALL be created and no existing slot SHALL be reset
 
 #### Scenario: Branch checked out in an unmanaged worktree
@@ -56,7 +62,7 @@ slot SHALL be provisioned, reset, or created for this invocation.
 - **AND** `shared-branch` is currently checked out in a worktree outside the
   bonsai pool (e.g. created manually via `git worktree add`)
 - **THEN** the command SHALL exit with a non-zero status
-- **THEN** stderr SHALL contain an actionable error message identifying that
+- **THEN** stderr SHALL contain git's own error message identifying that
   worktree's path
 
 ### Requirement: Branch name is shown in output

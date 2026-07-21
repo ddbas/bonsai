@@ -15,16 +15,15 @@ branch in one step, matching the ergonomics of
   `bs get <branch-name>` provisions (or reuses) a slot exactly as `bs get` does
   today, then checks out the **existing** branch `<branch-name>` inside it (via
   `git checkout <branch-name>`, not `-b`/`-B`).
-- If `<branch-name>` does not exist in the repository, the command SHALL exit
-  with a non-zero status and an actionable error message (it SHALL NOT create
-  the branch).
+- If `<branch-name>` does not exist in the repository, or is already checked out
+  in another worktree (managed or not), the command SHALL exit with a non-zero
+  status and an actionable error message. These checks are NOT reimplemented in
+  the CLI: `git checkout <branch-name>` and
+  `git worktree add <path> <branch-name>` already perform them natively, so
+  `bs get <branch-name>` simply surfaces the underlying git error rather than
+  duplicating the validation.
 - The positional `branch` argument and the `-b`/`-B` flags are mutually
   exclusive; supplying both SHALL result in a non-zero exit and a usage error.
-- If a worktree already exists for the given branch (i.e. the branch is
-  currently checked out in another worktree, managed or not),
-  `bs get <branch-name>` SHALL error out, mirroring `git worktree add`'s own
-  "already checked out" behavior, instead of silently reusing or resetting a
-  slot.
 - Output continues to show the branch name alongside the slot path, matching
   existing `-b`/`-B` behavior.
 
@@ -45,7 +44,6 @@ branch in one step, matching the ergonomics of
 ## Impact
 
 - Affected code: `src/main.rs` (CLI argument parsing, `Commands::Get`),
-  `src/worktree/mod.rs` (`get_worktree`, `BranchMode`, slot reset/create logic,
-  branch-existence and already-checked-out checks).
+  `src/worktree/mod.rs` (`BranchMode`, `reset_slot`, `create_slot`).
 - No changes to on-disk pool layout, locking, or the `-b`/`-B` semantics already
   implemented.

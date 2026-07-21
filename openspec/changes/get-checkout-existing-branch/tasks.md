@@ -8,42 +8,39 @@
       to `get_worktree`, matching the existing `new_branch`/`reset_branch`
       dispatch pattern
 
-## 2. Pre-flight branch validation
+## 2. Slot checkout logic
 
-- [ ] 2.1 Add a helper to check branch existence via
-      `git show-ref --verify     --quiet refs/heads/<branch>` (or equivalent)
-      without mutating any worktree
-- [ ] 2.2 Reuse/extract the existing `git worktree list --porcelain` parsing
-      helper to detect whether `<branch>` is already checked out in any worktree
-      (managed or unmanaged), returning that worktree's path when found
-- [ ] 2.3 In `get_worktree`, when `branch` is `BranchMode::Existing`, run both
-      checks **before** pool scanning/slot creation; bail out with an actionable
-      error (naming the branch, or the conflicting worktree path) if either
-      check fails
-
-## 3. Slot checkout logic
-
-- [ ] 3.1 Extend `reset_slot` and `create_slot` to handle `BranchMode::Existing`
-      by running `git -C <slot> checkout <branch>` (no `-b`/`-B`)
-- [ ] 3.2 Ensure the branch name is surfaced back to `main.rs` for output
+- [ ] 2.1 Extend `reset_slot` to handle `BranchMode::Existing` by running
+      `git -C <slot> checkout <branch>` (no `head_sha`, no `-b`/`-B`) — rely on
+      git's own failure when the branch doesn't exist or is already checked out
+      elsewhere; do not add any pre-flight validation
+- [ ] 2.2 Extend `create_slot` to handle `BranchMode::Existing` by running
+      `git worktree add <slot_path> <branch>` (no `--detach`, no `head_sha`, no
+      `-b`/`-B`) — same reliance on git's native checks
+- [ ] 2.3 Ensure `get_worktree` propagates the underlying `git` stderr unchanged
+      on failure (matching the existing `bail!` pattern used for `-b`/`-B`), so
+      no slot is left half-provisioned
+- [ ] 2.4 Ensure the branch name is surfaced back to `main.rs` for output
       formatting, matching the `-b`/`-B` output path (`🌳 <path>  (<branch>)`)
 
-## 4. Tests
+## 3. Tests
 
-- [ ] 4.1 Unit test: `bs get <branch>` on an existing, unclaimed branch checks
-      out that branch in the slot (not detached)
-- [ ] 4.2 Unit test: `bs get <branch>` on a non-existent branch errors out
-      without creating/resetting any slot
-- [ ] 4.3 Unit test: `bs get <branch>` on a branch already checked out in
-      another managed slot errors out and names the conflicting path
-- [ ] 4.4 Unit test: `bs get <branch>` on a branch already checked out in an
-      unmanaged worktree errors out and names the conflicting path
-- [ ] 4.5 CLI parsing test: positional `branch` conflicts with `-b`
-- [ ] 4.6 CLI parsing test: positional `branch` conflicts with `-B`
-- [ ] 4.7 Update/extend existing `-b`/`-B` conflict tests to confirm they are
+- [ ] 3.1 Integration test: `bs get <branch>` on an existing, unclaimed branch
+      checks out that branch in the slot (not detached)
+- [ ] 3.2 Integration test: `bs get <branch>` on a non-existent branch errors
+      out (relying on git's native error) without creating/resetting any slot
+- [ ] 3.3 Integration test: `bs get <branch>` on a branch already checked out in
+      another managed slot errors out (relying on git's native error) and the
+      error names the conflicting path
+- [ ] 3.4 Integration test: `bs get <branch>` on a branch already checked out in
+      an unmanaged worktree errors out and the error names the conflicting path
+- [ ] 3.5 CLI parsing test: positional `branch` conflicts with `-b`
+- [ ] 3.6 CLI parsing test: positional `branch` conflicts with `-B`
+- [ ] 3.7 Update/extend existing `-b`/`-B` conflict tests to confirm they are
       unaffected by the new positional argument
 
-## 5. Documentation
+## 4. Documentation
 
-- [ ] 5.1 Update `bs get` help text / doc comments in `src/main.rs` to describe
+- [ ] 4.1 Update `bs get` help text / doc comments in `src/main.rs` to describe
       the new positional `<branch>` argument and its interaction with `-b`/`-B`
+      </content>
