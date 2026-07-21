@@ -725,24 +725,33 @@ pub fn prune_worktrees() -> Result<()> {
 pub fn lock_worktree(path: &Path, reason: Option<&str>) -> Result<()> {
     let path_str = path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?
+        .to_string();
+
+    if let Some(msg) = reason {
+        tracing::info!("Locking slot {} with reason: {}", path_str, msg);
+    } else {
+        tracing::info!("Locking slot {}", path_str);
+    }
 
     let output = if let Some(msg) = reason {
         git_cmd()
-            .args(["worktree", "lock", "--reason", msg, path_str])
+            .args(["worktree", "lock", "--reason", msg, &path_str])
             .output()
             .context("failed to spawn `git worktree lock`")?
     } else {
         git_cmd()
-            .args(["worktree", "lock", path_str])
+            .args(["worktree", "lock", &path_str])
             .output()
             .context("failed to spawn `git worktree lock`")?
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("Failed to lock slot {}: {}", path_str, stderr.trim());
         bail!("`git worktree lock` failed: {}", stderr.trim());
     }
+    tracing::debug!("Successfully locked slot {}", path_str);
     Ok(())
 }
 
@@ -753,17 +762,22 @@ pub fn lock_worktree(path: &Path, reason: Option<&str>) -> Result<()> {
 pub fn unlock_worktree(path: &Path) -> Result<()> {
     let path_str = path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("slot path is not valid UTF-8: {}", path.display()))?
+        .to_string();
+
+    tracing::info!("Unlocking slot {}", path_str);
 
     let output = git_cmd()
-        .args(["worktree", "unlock", path_str])
+        .args(["worktree", "unlock", &path_str])
         .output()
         .context("failed to spawn `git worktree unlock`")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("Failed to unlock slot {}: {}", path_str, stderr.trim());
         bail!("`git worktree unlock` failed: {}", stderr.trim());
     }
+    tracing::debug!("Successfully unlocked slot {}", path_str);
     Ok(())
 }
 
@@ -799,6 +813,7 @@ pub fn validate_pool_slot(path: &Path, pool_dir: &Path) -> Result<()> {
 pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
     let (entries, has_stale) = list_pool_worktrees_checking_stale(pool_dir)?;
     if has_stale {
+        tracing::info!("Pruning stale worktrees from pool");
         prune_worktrees()?;
     }
     for entry in entries {
@@ -811,8 +826,10 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
         if count_open_processes(&entry.path)? > 0 {
             continue;
         }
+        tracing::info!("Found available slot: {}", entry.path.display());
         return Ok(Some(entry.path));
     }
+    tracing::debug!("No available slots found in pool");
     Ok(None)
 }
 
@@ -828,6 +845,19 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
 ///   checked out elsewhere)
 pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>) -> Result<()> {
     let slot_str = slot_path.to_string_lossy();
+    let branch_desc = match branch {
+        None => "detached HEAD".to_string(),
+        Some(BranchMode::New(name)) => format!("new branch {}", name),
+        Some(BranchMode::Reset(name)) => format!("reset branch {}", name),
+        Some(BranchMode::Existing(name)) => format!("existing branch {}", name),
+    };
+    tracing::debug!(
+        "Resetting slot {} to {} ({})",
+        slot_str,
+        head_sha,
+        branch_desc
+    );
+
     let output = match branch {
         None => git_cmd()
             .args(["-C", &slot_str, "checkout", "--detach", head_sha])
@@ -849,9 +879,15 @@ pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>)
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "git checkout failed for slot {}: {}",
+            slot_str,
+            stderr.trim()
+        );
         bail!("`git checkout` failed: {}", stderr.trim());
     }
 
+    tracing::debug!("Successfully reset slot {}", slot_str);
     Ok(())
 }
 

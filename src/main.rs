@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 
+use bonsai::logging;
 use bonsai::worktree;
 
 #[derive(Parser)]
@@ -12,6 +13,16 @@ use bonsai::worktree;
     disable_help_subcommand = true,
 )]
 struct Cli {
+    /// Log level for file output: trace, debug, info (default), warn, or error.
+    ///
+    /// Controls which log events are written to the log file. The default level
+    /// is `info`, which captures important events without excessive verbosity.
+    /// Higher levels (warn, error) are more concise; lower levels (debug, trace)
+    /// include more diagnostic detail. Logs are written only to a file in the
+    /// platform log directory; stdout and stderr are never affected.
+    #[arg(long, global = true, default_value = "info", value_name = "LEVEL")]
+    log_level: logging::LogLevel,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -116,6 +127,17 @@ enum Commands {
         /// Defaults to the current slot when omitted.
         path: Option<std::path::PathBuf>,
     },
+
+    /// Print bonsai's runtime paths and metadata.
+    ///
+    /// Displays bonsai's own resolved paths (log directory, current log file,
+    /// managed root) and metadata (version, effective log level) to stdout in
+    /// a simple `key: value` format, one field per line.
+    ///
+    /// This command performs no filesystem writes and works correctly whether
+    /// or not any bonsai worktrees have been created yet, making it useful as
+    /// a first debugging step if logging or other components fail to initialize.
+    Info,
 }
 
 fn format_stats(stats: &worktree::WorktreeStats) -> String {
@@ -306,6 +328,15 @@ fn main() {
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Initialize logging (best-effort; failures are non-fatal)
+    let _guard = logging::init(cli.log_level);
+
+    // Log the parsed CLI invocation
+    tracing::debug!(
+        "CLI invocation: bs {:?}",
+        std::env::args().collect::<Vec<_>>()
+    );
+
     match cli.command {
         // Default command (no subcommand): always detached HEAD.
         // The -b/-B flags require the explicit `bs get` subcommand.
@@ -479,7 +510,7 @@ fn run() -> anyhow::Result<()> {
             None => {
                 println!("Not inside a managed bonsai worktree.");
                 println!("Run `bs get` to provision a slot, then `cd` into it.");
-                std::process::exit(1);
+                anyhow::bail!("not inside a managed bonsai worktree");
             }
         },
 
@@ -527,6 +558,40 @@ fn run() -> anyhow::Result<()> {
             worktree::validate_pool_slot(&target, &pool_dir)?;
             worktree::unlock_worktree(&target)?;
             println!("\u{1f513} unlocked {}", worktree::tilde_path(&target));
+        }
+
+        Some(Commands::Info) => {
+            // Gather runtime info
+            let version = env!("CARGO_PKG_VERSION");
+
+            // Get the effective log level (from CLI args)
+            let log_level = match cli.log_level {
+                logging::LogLevel::Trace => "trace",
+                logging::LogLevel::Debug => "debug",
+                logging::LogLevel::Info => "info",
+                logging::LogLevel::Warn => "warn",
+                logging::LogLevel::Error => "error",
+            };
+
+            // Get log directory and current log file
+            let log_dir = logging::log_dir()
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve log directory"))?;
+            let current_log_file = logging::current_log_file(&log_dir);
+
+            // Get managed root
+            let managed_root = worktree::managed_root()?;
+
+            // Format paths with tilde abbreviation
+            let log_dir_tilde = worktree::tilde_path(&log_dir);
+            let current_log_file_tilde = worktree::tilde_path(&current_log_file);
+            let managed_root_tilde = worktree::tilde_path(&managed_root);
+
+            // Print output as key: value lines
+            println!("version: {}", version);
+            println!("log level: {}", log_level);
+            println!("log directory: {}", log_dir_tilde);
+            println!("current log file: {}", current_log_file_tilde);
+            println!("managed root: {}", managed_root_tilde);
         }
     }
 
