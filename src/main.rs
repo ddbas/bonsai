@@ -30,10 +30,37 @@ enum Commands {
     /// `git checkout -B`). Without either flag the slot is left in detached
     /// HEAD state.
     ///
+    /// Pass a positional `<branch>` argument to check out an *existing*
+    /// branch inside the provisioned slot (mirroring plain
+    /// `git checkout <branch>` / `git worktree add <path> <branch>`); the
+    /// branch is not created or reset, and must already exist in the
+    /// repository. If `<branch>` is already checked out in one of this
+    /// repo's other bonsai-managed pool slots, that existing slot's path is
+    /// returned as-is (no new slot is provisioned, and no slot is reset or
+    /// checked out again) rather than erroring; it only fails if the branch
+    /// does not exist at all, or is checked out in a worktree outside the
+    /// bonsai pool. The positional `<branch>` argument, `-b`, and `-B` are
+    /// pairwise mutually exclusive.
+    ///
     /// This is also the default command: running `bs` with no subcommand
-    /// is equivalent to `bs get` (always detached HEAD; `-b`/`-B` require
-    /// the explicit `get` subcommand).
+    /// is equivalent to `bs get` (always detached HEAD; the positional
+    /// `<branch>` argument and `-b`/`-B` require the explicit `get`
+    /// subcommand).
     Get {
+        /// Check out an existing branch inside the provisioned slot.
+        /// Fails if the branch does not exist, or is checked out in a
+        /// worktree outside the bonsai pool. If the branch is already
+        /// checked out in one of this repo's other bonsai-managed pool
+        /// slots, that slot's path is returned as-is instead of erroring
+        /// (mirrors plain `git checkout <branch>`, except for the
+        /// already-managed-slot case). Mutually exclusive with `-b`/`-B`.
+        #[arg(
+            value_name = "BRANCH",
+            conflicts_with = "new_branch",
+            conflicts_with = "reset_branch"
+        )]
+        branch: Option<String>,
+
         /// Create a new branch at HEAD in the provisioned slot.
         /// Fails if the branch already exists (mirrors `git checkout -b`).
         #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "reset_branch")]
@@ -289,17 +316,21 @@ fn run() -> anyhow::Result<()> {
 
         // Explicit `bs get` with optional -b/-B branch flags.
         Some(Commands::Get {
+            branch,
             new_branch,
             reset_branch,
         }) => {
-            let branch = match (new_branch, reset_branch) {
-                (Some(b), None) => Some(worktree::BranchMode::New(b)),
-                (None, Some(b)) => Some(worktree::BranchMode::Reset(b)),
+            let branch = match (branch, new_branch, reset_branch) {
+                (Some(b), None, None) => Some(worktree::BranchMode::Existing(b)),
+                (None, Some(b), None) => Some(worktree::BranchMode::New(b)),
+                (None, None, Some(b)) => Some(worktree::BranchMode::Reset(b)),
                 _ => None,
             };
             // Capture the name before moving `branch` into get_worktree.
             let branch_name: Option<String> = branch.as_ref().map(|m| match m {
-                worktree::BranchMode::New(b) | worktree::BranchMode::Reset(b) => b.clone(),
+                worktree::BranchMode::New(b)
+                | worktree::BranchMode::Reset(b)
+                | worktree::BranchMode::Existing(b) => b.clone(),
             });
             let path = worktree::get_worktree(branch)?;
             match branch_name.as_deref() {
