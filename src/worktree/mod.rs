@@ -525,9 +525,23 @@ fn parse_lsof_pids(stdout: &str) -> usize {
 /// Docker containers alongside the test suite (e.g. GitHub Actions with
 /// testcontainers).
 ///
+/// On macOS, `lsof` can also emit a standalone diagnostic line such as:
+///
+/// ```text
+/// assuming "dev=1000015" from mount table
+/// ```
+///
+/// This happens when `lsof` cannot resolve the device id for a mount via
+/// `getfsstat` (e.g. certain external volumes, network shares, or
+/// snapshot/backup filesystems) and falls back to a value read straight from
+/// the mount table. It is purely informational — it says nothing about open
+/// file handles on the target path — but unlike the Linux warnings above it
+/// is not prefixed with `lsof: WARNING:`, so it must be filtered separately.
+///
 /// Returns the subset of `stderr` lines that are genuine errors (i.e. not
-/// `lsof: WARNING:` lines and not the associated "Output information may be
-/// incomplete." continuation lines).
+/// `lsof: WARNING:` lines, not the associated "Output information may be
+/// incomplete." continuation line, and not the macOS "assuming ... from
+/// mount table" diagnostic).
 fn lsof_real_errors(stderr: &str) -> String {
     stderr
         .lines()
@@ -535,6 +549,8 @@ fn lsof_real_errors(stderr: &str) -> String {
             let trimmed = line.trim();
             !trimmed.starts_with("lsof: WARNING:")
                 && trimmed != "Output information may be incomplete."
+                && !(trimmed.starts_with("assuming \"dev=")
+                    && trimmed.ends_with("from mount table"))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1372,6 +1388,18 @@ mod tests {
         assert!(
             result.trim().is_empty(),
             "Docker WARNING lines should all be filtered out, got: {result:?}"
+        );
+    }
+
+    /// The macOS "assuming ... from mount table" diagnostic must be stripped;
+    /// the result must be empty → no real error.
+    #[test]
+    fn lsof_real_errors_strips_macos_mount_table_assumption() {
+        let stderr = "assuming \"dev=1000015\" from mount table\n";
+        let result = lsof_real_errors(stderr);
+        assert!(
+            result.trim().is_empty(),
+            "macOS mount table assumption line should be filtered out, got: {result:?}"
         );
     }
 
