@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 
+use bonsai::logging;
 use bonsai::worktree;
 
 #[derive(Parser)]
@@ -12,6 +13,16 @@ use bonsai::worktree;
     disable_help_subcommand = true,
 )]
 struct Cli {
+    /// Log level for file output: trace, debug, info (default), warn, or error.
+    ///
+    /// Controls which log events are written to the log file. The default level
+    /// is `info`, which captures important events without excessive verbosity.
+    /// Higher levels (warn, error) are more concise; lower levels (debug, trace)
+    /// include more diagnostic detail. Logs are written only to a file in the
+    /// platform log directory; stdout and stderr are never affected.
+    #[arg(long, global = true, default_value = "info", value_name = "LEVEL")]
+    log_level: logging::LogLevel,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -306,6 +317,15 @@ fn main() {
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Initialize logging (best-effort; failures are non-fatal)
+    let _guard = logging::init(cli.log_level);
+
+    // Log the parsed CLI invocation
+    tracing::debug!(
+        "CLI invocation: bs {:?}",
+        std::env::args().collect::<Vec<_>>()
+    );
+
     match cli.command {
         // Default command (no subcommand): always detached HEAD.
         // The -b/-B flags require the explicit `bs get` subcommand.
@@ -479,7 +499,7 @@ fn run() -> anyhow::Result<()> {
             None => {
                 println!("Not inside a managed bonsai worktree.");
                 println!("Run `bs get` to provision a slot, then `cd` into it.");
-                std::process::exit(1);
+                anyhow::bail!("not inside a managed bonsai worktree");
             }
         },
 
