@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use chrono;
 use clap::ValueEnum;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::Layer;
@@ -44,11 +45,21 @@ impl LogLevel {
 ///
 /// Tries `dirs::state_dir()` first (XDG_STATE_HOME or `~/.local/state` on Linux),
 /// falls back to `dirs::data_local_dir()` on other platforms, then appends `bonsai/logs`.
-/// Returns the resolved path, but does not create it.
-fn log_dir() -> Option<PathBuf> {
+/// Returns the resolved path, but does not create it. No I/O or side effects.
+pub fn log_dir() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|base| base.join("bonsai").join("logs"))
+}
+
+/// Compute the expected log file path for a given day.
+///
+/// Uses the same naming scheme as the rolling appender: `bonsai.log.YYYY-MM-DD`.
+/// The path is computed based on today's date; it is not verified to exist on disk.
+/// No I/O or side effects.
+pub fn current_log_file(dir: &std::path::Path) -> PathBuf {
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    dir.join(format!("bonsai.log.{}", today))
 }
 
 /// Prune old log files, keeping only the most recent `retention_count`.
@@ -215,5 +226,53 @@ mod tests {
         let _ = init(LogLevel::Info);
         // If we get here, init returned without panicking
         assert!(true);
+    }
+
+    #[test]
+    fn test_current_log_file_returns_path() {
+        use std::path::PathBuf;
+        let test_dir = PathBuf::from("/tmp/test/logs");
+        let result = current_log_file(&test_dir);
+
+        // Should return a path ending with bonsai.log and today's date
+        let file_name = result.file_name().unwrap().to_string_lossy();
+        assert!(
+            file_name.starts_with("bonsai.log."),
+            "log file should start with 'bonsai.log.', got: {file_name}"
+        );
+    }
+
+    #[test]
+    fn test_current_log_file_has_date_suffix() {
+        use std::path::PathBuf;
+
+        let test_dir = PathBuf::from("/tmp/logs");
+        let result = current_log_file(&test_dir);
+        let file_name = result.file_name().unwrap().to_string_lossy();
+
+        // Verify the filename has the pattern bonsai.log.YYYY-MM-DD
+        assert!(
+            file_name.starts_with("bonsai.log."),
+            "should start with 'bonsai.log.'"
+        );
+        let date_part = file_name.strip_prefix("bonsai.log.").unwrap();
+
+        // Should be 10 characters: YYYY-MM-DD
+        assert_eq!(
+            date_part.len(),
+            10,
+            "date part should be YYYY-MM-DD format (10 chars), got: {date_part}"
+        );
+
+        // Check that parts are numeric and separated by dashes
+        let parts: Vec<&str> = date_part.split('-').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "date should have 3 parts separated by dashes"
+        );
+        assert!(parts[0].parse::<u32>().is_ok(), "year should be numeric");
+        assert!(parts[1].parse::<u32>().is_ok(), "month should be numeric");
+        assert!(parts[2].parse::<u32>().is_ok(), "day should be numeric");
     }
 }

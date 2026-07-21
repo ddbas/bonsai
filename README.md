@@ -77,3 +77,43 @@ Valid levels are: `trace`, `debug`, `info` (default), `warn`, `error`.
 
 Old log files are automatically pruned to keep the most recent 7 daily log
 files. This bounds disk usage and prevents unbounded log growth.
+
+## Getting Runtime Information
+
+### `bs info` – View Bonsai Configuration & Paths
+
+The `bs info` command prints bonsai's own runtime paths and metadata, useful for
+debugging or scripting.
+
+```bash
+$ bs info
+version: 0.1.0
+log level: info
+log directory: ~/Library/Application Support/bonsai/logs
+current log file: ~/Library/Application Support/bonsai/logs/bonsai.log.2026-07-21
+managed root: ~/.bonsai
+```
+
+**Output fields:**
+
+- `version`: The bonsai version being run
+- `log level`: The effective log level for this invocation (default is `info`,
+  or overridden via `--log-level`)
+- `log directory`: The resolved log directory path
+- `current log file`: The path to today's active log file (may not yet exist if
+  logging has never been initialized)
+- `managed root`: The root directory where all bonsai-managed worktree pools are
+  stored (`~/.bonsai`)
+
+All paths are tilde-abbreviated (e.g., `~/` for the user's home directory) and
+formatted as plain `key: value` lines, making the output easy to parse with
+`grep` or shell scripts:
+
+```bash
+$ bs info | grep 'log directory'
+log directory: ~/Library/Application Support/bonsai/logs
+```
+
+The `bs info` command performs no filesystem writes and will succeed even if
+logging has never been initialized, making it safe to use as a first debugging
+step when bonsai encounters issues.

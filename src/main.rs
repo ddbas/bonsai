@@ -127,6 +127,17 @@ enum Commands {
         /// Defaults to the current slot when omitted.
         path: Option<std::path::PathBuf>,
     },
+
+    /// Print bonsai's runtime paths and metadata.
+    ///
+    /// Displays bonsai's own resolved paths (log directory, current log file,
+    /// managed root) and metadata (version, effective log level) to stdout in
+    /// a simple `key: value` format, one field per line.
+    ///
+    /// This command performs no filesystem writes and works correctly whether
+    /// or not any bonsai worktrees have been created yet, making it useful as
+    /// a first debugging step if logging or other components fail to initialize.
+    Info,
 }
 
 fn format_stats(stats: &worktree::WorktreeStats) -> String {
@@ -547,6 +558,40 @@ fn run() -> anyhow::Result<()> {
             worktree::validate_pool_slot(&target, &pool_dir)?;
             worktree::unlock_worktree(&target)?;
             println!("\u{1f513} unlocked {}", worktree::tilde_path(&target));
+        }
+
+        Some(Commands::Info) => {
+            // Gather runtime info
+            let version = env!("CARGO_PKG_VERSION");
+
+            // Get the effective log level (from CLI args)
+            let log_level = match cli.log_level {
+                logging::LogLevel::Trace => "trace",
+                logging::LogLevel::Debug => "debug",
+                logging::LogLevel::Info => "info",
+                logging::LogLevel::Warn => "warn",
+                logging::LogLevel::Error => "error",
+            };
+
+            // Get log directory and current log file
+            let log_dir = logging::log_dir()
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve log directory"))?;
+            let current_log_file = logging::current_log_file(&log_dir);
+
+            // Get managed root
+            let managed_root = worktree::managed_root()?;
+
+            // Format paths with tilde abbreviation
+            let log_dir_tilde = worktree::tilde_path(&log_dir);
+            let current_log_file_tilde = worktree::tilde_path(&current_log_file);
+            let managed_root_tilde = worktree::tilde_path(&managed_root);
+
+            // Print output as key: value lines
+            println!("version: {}", version);
+            println!("log level: {}", log_level);
+            println!("log directory: {}", log_dir_tilde);
+            println!("current log file: {}", current_log_file_tilde);
+            println!("managed root: {}", managed_root_tilde);
         }
     }
 
