@@ -914,6 +914,25 @@ pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
         )
     })?;
 
+    // For a positional `<branch>` argument (BranchMode::Existing), first check
+    // whether one of this repo's managed pool slots already has that branch
+    // checked out. If so, hand back that slot's path directly rather than
+    // attempting to provision/reset a (possibly different) slot, since git
+    // would otherwise refuse to check the branch out a second time.
+    // `BranchMode::New`/`BranchMode::Reset` intentionally skip this lookup:
+    // they express an explicit create/reset intent, not "reuse whatever slot
+    // has this branch".
+    if let Some(BranchMode::Existing(name)) = &branch
+        && let Some(existing_slot) = find_slot_checked_out_on_branch(&pool_dir, name)?
+    {
+        return existing_slot.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize slot path {}",
+                existing_slot.display()
+            )
+        });
+    }
+
     let slot_path = match find_available_slot(&pool_dir)? {
         Some(existing) => {
             reset_slot(&existing, &head_sha, branch.as_ref())?;
@@ -932,6 +951,29 @@ pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
 }
 
 // -- Current worktree detection (section 5) ---------------------------------
+
+/// Find the first pool slot (if any) currently checked out on `branch`.
+///
+/// Reuses the same per-slot "which branch is checked out here" data
+/// (`WorktreeEntry::branch`) that backs [`list_worktrees_status`] and
+/// [`current_worktree`]. Returns `Ok(None)` immediately when `pool_dir` does
+/// not exist on disk (mirroring [`find_slot_for_cwd`]); detached-HEAD slots
+/// (`entry.branch == None`) never match.
+pub(crate) fn find_slot_checked_out_on_branch(
+    pool_dir: &Path,
+    branch: &str,
+) -> Result<Option<PathBuf>> {
+    if !pool_dir.exists() {
+        return Ok(None);
+    }
+    let entries = list_pool_worktrees(pool_dir)?;
+    for entry in entries {
+        if entry.branch.as_deref() == Some(branch) {
+            return Ok(Some(entry.path));
+        }
+    }
+    Ok(None)
+}
 
 /// Internal helper: find which pool slot (if any) `cwd` is inside.
 ///
@@ -1666,6 +1708,93 @@ mod tests {
         assert!(
             fake_cwd.starts_with(&found_path),
             "returned path should be an ancestor of the fake CWD"
+        );
+    }
+
+    // -- find_slot_checked_out_on_branch --------------------------------------
+
+    /// When the pool directory does not exist on disk,
+    /// `find_slot_checked_out_on_branch` MUST return `Ok(None)` without
+    /// error (mirroring `find_slot_for_cwd`'s absent-pool behaviour).
+    #[test]
+    fn find_slot_checked_out_on_branch_returns_none_for_absent_pool() {
+        let nonexistent = PathBuf::from("/nonexistent/bonsai-pool-path-xyz");
+        let result = find_slot_checked_out_on_branch(&nonexistent, "any-branch")
+            .expect("absent pool dir should not error");
+        assert!(result.is_none(), "absent pool dir should return None");
+    }
+
+    /// When the pool directory exists but has no registered worktree slots
+    /// (e.g. a fresh temp dir that is not itself a `git worktree add`
+    /// target), `find_slot_checked_out_on_branch` MUST return `Ok(None)`.
+    #[test]
+    fn find_slot_checked_out_on_branch_returns_none_when_no_match() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let result = find_slot_checked_out_on_branch(dir.path(), "no-such-branch")
+            .expect("pool dir with no matching slot should not error");
+        assert!(
+            result.is_none(),
+            "fresh pool dir with no matching slot should return None"
+        );
+    }
+
+    /// When exactly one pool slot is checked out on the requested branch,
+    /// `find_slot_checked_out_on_branch` MUST return that slot's path.
+    /// Skipped when this machine has no bonsai pool provisioned for the
+    /// current repo (mirrors `find_slot_for_cwd_matches_slot_ancestor`'s
+    /// environment-dependent skip).
+    #[test]
+    fn find_slot_checked_out_on_branch_matches_single_slot() {
+        let Ok(root) = managed_root() else { return };
+        let Ok(slug) = repo_slug() else { return };
+        let pool_dir = root.join(&slug);
+        if !pool_dir.exists() {
+            return; // pool not provisioned on this machine; skip
+        }
+        let Ok(entries) = list_pool_worktrees(&pool_dir) else {
+            return;
+        };
+        let Some(entry) = entries.into_iter().find(|e| e.branch.is_some()) else {
+            return; // no branch-checked-out slot to test against; skip
+        };
+        let branch = entry.branch.clone().unwrap();
+        let result = find_slot_checked_out_on_branch(&pool_dir, &branch)
+            .expect("find_slot_checked_out_on_branch should not error");
+        assert_eq!(
+            result,
+            Some(entry.path),
+            "should return the slot checked out on {branch}"
+        );
+    }
+
+    /// A locked slot that is checked out on the requested branch is still a
+    /// match: locking does not exclude a slot from this lookup (unlike
+    /// `find_available_slot`, which skips locked slots).
+    /// Skipped when this machine has no locked, branch-checked-out slot in
+    /// the current repo's pool.
+    #[test]
+    fn find_slot_checked_out_on_branch_matches_locked_slot() {
+        let Ok(root) = managed_root() else { return };
+        let Ok(slug) = repo_slug() else { return };
+        let pool_dir = root.join(&slug);
+        if !pool_dir.exists() {
+            return; // pool not provisioned on this machine; skip
+        }
+        let Ok(entries) = list_pool_worktrees(&pool_dir) else {
+            return;
+        };
+        let Some(entry) = entries.into_iter().find(|e| e.locked && e.branch.is_some()) else {
+            return; // no locked, branch-checked-out slot to test against; skip
+        };
+        let branch = entry.branch.clone().unwrap();
+        let result = find_slot_checked_out_on_branch(&pool_dir, &branch)
+            .expect("find_slot_checked_out_on_branch should not error");
+        assert_eq!(
+            result,
+            Some(entry.path),
+            "a locked slot checked out on {branch} should still be returned"
         );
     }
 }

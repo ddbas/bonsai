@@ -612,8 +612,11 @@ async fn get_positional_branch_nonexistent_errors() {
 
 // ── positional branch: already checked out in another managed slot ──────────
 
+/// When `<branch>` is already checked out in another bonsai-managed pool slot
+/// for this repo, `bs get <branch>` returns that existing slot's path
+/// (with branch name) and exits 0, without provisioning or resetting a slot.
 #[tokio::test]
-async fn get_positional_branch_already_checked_out_in_managed_slot_errors() {
+async fn get_positional_branch_already_checked_out_in_managed_slot_returns_existing_slot() {
     let env = GitEnv::new().await;
 
     // Provision a slot and check out `shared-branch` in it via -b.
@@ -625,9 +628,9 @@ async fn get_positional_branch_already_checked_out_in_managed_slot_errors() {
     assert!(out.status.success(), "initial bs get -b should succeed");
     let claimed_slot = path_from_output(&out.stdout);
 
-    // Dirty the claimed slot so the next `bs get` cannot reuse it and is
-    // forced to provision a fresh slot when attempting the positional
-    // checkout.
+    // Dirty the claimed slot so `find_available_slot` would skip it if the
+    // branch-ownership pre-check were not in place; this ensures the test
+    // exercises the pre-check rather than an incidental slot reuse.
     std::fs::write(claimed_slot.join("dirty.txt"), "dirty").unwrap();
 
     let out2 = env
@@ -637,14 +640,133 @@ async fn get_positional_branch_already_checked_out_in_managed_slot_errors() {
         .expect("spawn bs get shared-branch");
 
     assert!(
-        !out2.status.success(),
-        "bs get <branch> should fail when the branch is checked out elsewhere"
+        out2.status.success(),
+        "bs get <branch> should succeed when the branch is already checked out \
+         in a managed slot for this repo\nstderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out2.stderr);
+
+    let returned_slot = path_from_output(&out2.stdout);
+    assert_eq!(
+        returned_slot, claimed_slot,
+        "should return the existing slot that already has shared-branch checked out"
+    );
+
+    let shown = branch_from_output(&out2.stdout);
+    assert_eq!(
+        shown.as_deref(),
+        Some("shared-branch"),
+        "stdout should include the branch name"
+    );
+
+    // The dirtying marker must still be present: the slot must not have been
+    // reset or otherwise touched.
     assert!(
-        stderr.contains(&claimed_slot.display().to_string()) || stderr.contains("shared-branch"),
-        "stderr should name the conflicting worktree path or branch; got: {stderr:?}"
+        claimed_slot.join("dirty.txt").exists(),
+        "the existing slot must not be reset when returned via the pre-check"
     );
+
+    // No second slot should have been created for this repo's pool.
+    let slug_dir = env.slug_dir();
+    let slot_count = std::fs::read_dir(&slug_dir)
+        .map(|d| d.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(
+        slot_count, 1,
+        "no new slot should be created when the branch is already claimed"
+    );
+}
+
+/// When the already-claimed managed slot has additionally been locked via
+/// `bs lock`, `bs get <branch>` must still return that slot's path
+/// successfully, and the slot must remain locked afterward.
+#[tokio::test]
+async fn get_positional_branch_already_checked_out_in_locked_managed_slot_returns_existing_slot() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "shared-branch"])
+        .output()
+        .expect("spawn bs get -b shared-branch");
+    assert!(out.status.success(), "initial bs get -b should succeed");
+    let claimed_slot = path_from_output(&out.stdout);
+
+    let lock_out = env
+        .bs()
+        .args(["lock", claimed_slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs lock");
+    assert!(
+        lock_out.status.success(),
+        "bs lock should succeed\nstderr: {}",
+        String::from_utf8_lossy(&lock_out.stderr)
+    );
+
+    let out2 = env
+        .bs()
+        .args(["get", "shared-branch"])
+        .output()
+        .expect("spawn bs get shared-branch");
+
+    assert!(
+        out2.status.success(),
+        "bs get <branch> should succeed even when the existing slot is locked\nstderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let returned_slot = path_from_output(&out2.stdout);
+    assert_eq!(
+        returned_slot, claimed_slot,
+        "should return the locked slot that already has shared-branch checked out"
+    );
+
+    // The slot must remain locked afterward.
+    let porcelain = host_git(&env.repo_path, &["worktree", "list", "--porcelain"]);
+    let porcelain_text = String::from_utf8_lossy(&porcelain.stdout);
+    assert!(
+        porcelain_text.contains("locked"),
+        "slot should remain locked after bs get <branch>, got: {porcelain_text:?}"
+    );
+}
+
+/// Regression test: calling `bs get shared-branch` twice in a row after the
+/// branch was initially provisioned via `-b` must both succeed and return
+/// the same slot path — neither invocation should error.
+#[tokio::test]
+async fn get_positional_branch_repeated_calls_return_same_slot() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "shared-branch"])
+        .output()
+        .expect("spawn bs get -b shared-branch");
+    assert!(out.status.success(), "initial bs get -b should succeed");
+    let claimed_slot = path_from_output(&out.stdout);
+
+    let out2 = env
+        .bs()
+        .args(["get", "shared-branch"])
+        .output()
+        .expect("spawn bs get shared-branch (first)");
+    assert!(
+        out2.status.success(),
+        "first repeated bs get shared-branch should succeed\nstderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert_eq!(path_from_output(&out2.stdout), claimed_slot);
+
+    let out3 = env
+        .bs()
+        .args(["get", "shared-branch"])
+        .output()
+        .expect("spawn bs get shared-branch (second)");
+    assert!(
+        out3.status.success(),
+        "second repeated bs get shared-branch should succeed\nstderr: {}",
+        String::from_utf8_lossy(&out3.stderr)
+    );
+    assert_eq!(path_from_output(&out3.stdout), claimed_slot);
 }
 
 // ── positional branch: already checked out in an unmanaged worktree ──────────

@@ -34,8 +34,13 @@ enum Commands {
     /// branch inside the provisioned slot (mirroring plain
     /// `git checkout <branch>` / `git worktree add <path> <branch>`); the
     /// branch is not created or reset, and must already exist in the
-    /// repository and not be checked out in another worktree. The positional
-    /// `<branch>` argument, `-b`, and `-B` are pairwise mutually exclusive.
+    /// repository. If `<branch>` is already checked out in one of this
+    /// repo's other bonsai-managed pool slots, that existing slot's path is
+    /// returned as-is (no new slot is provisioned, and no slot is reset or
+    /// checked out again) rather than erroring; it only fails if the branch
+    /// does not exist at all, or is checked out in a worktree outside the
+    /// bonsai pool. The positional `<branch>` argument, `-b`, and `-B` are
+    /// pairwise mutually exclusive.
     ///
     /// This is also the default command: running `bs` with no subcommand
     /// is equivalent to `bs get` (always detached HEAD; the positional
@@ -43,9 +48,12 @@ enum Commands {
     /// subcommand).
     Get {
         /// Check out an existing branch inside the provisioned slot.
-        /// Fails if the branch does not exist, or is already checked out in
-        /// another worktree (mirrors plain `git checkout <branch>`).
-        /// Mutually exclusive with `-b`/`-B`.
+        /// Fails if the branch does not exist, or is checked out in a
+        /// worktree outside the bonsai pool. If the branch is already
+        /// checked out in one of this repo's other bonsai-managed pool
+        /// slots, that slot's path is returned as-is instead of erroring
+        /// (mirrors plain `git checkout <branch>`, except for the
+        /// already-managed-slot case). Mutually exclusive with `-b`/`-B`.
         #[arg(
             value_name = "BRANCH",
             conflicts_with = "new_branch",
