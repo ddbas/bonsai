@@ -505,9 +505,236 @@ async fn get_b_and_B_together_are_rejected() {
         !out.status.success(),
         "supplying both -b and -B should exit non-zero"
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr should describe the mutual-exclusion constraint; got: {stderr:?}"
+    );
 }
 
-// ── Local helpers ─────────────────────────────────────────────────────────────
+/// Regression guard: adding the positional `<branch>` argument must not
+/// affect plain `-b`/`-B` usage (no positional branch supplied).
+#[tokio::test]
+async fn get_b_and_B_alone_are_unaffected_by_positional_arg() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "solo-branch"])
+        .output()
+        .expect("spawn bs get -b solo-branch");
+    assert!(
+        out.status.success(),
+        "bs get -b alone should still succeed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let slot = path_from_output(&out.stdout);
+    assert_eq!(current_branch(&slot), "solo-branch");
+}
+
+// ── positional branch: checks out an existing, unclaimed branch ────────────
+
+#[tokio::test]
+async fn get_positional_branch_checks_out_existing_branch() {
+    let env = GitEnv::new().await;
+
+    // Create the branch in the repo without checking it out anywhere.
+    env.git(&["branch", "my-existing-branch"]).await;
+
+    let out = env
+        .bs()
+        .args(["get", "my-existing-branch"])
+        .output()
+        .expect("spawn bs get <branch>");
+    assert!(
+        out.status.success(),
+        "bs get <branch> should succeed for an existing, unclaimed branch\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let slot = path_from_output(&out.stdout);
+    assert!(slot.exists(), "slot must exist on disk");
+    assert_eq!(
+        current_branch(&slot),
+        "my-existing-branch",
+        "slot should be checked out on the existing branch, not detached"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains('🌳'),
+        "stdout should contain the 🌳 emoji; got: {stdout:?}"
+    );
+    let shown = branch_from_output(&out.stdout);
+    assert_eq!(
+        shown.as_deref(),
+        Some("my-existing-branch"),
+        "stdout should include the branch name; got: {stdout:?}"
+    );
+}
+
+// ── positional branch: non-existent branch errors out ───────────────────────
+
+#[tokio::test]
+async fn get_positional_branch_nonexistent_errors() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "no-such-branch"])
+        .output()
+        .expect("spawn bs get <branch>");
+
+    assert!(
+        !out.status.success(),
+        "bs get <branch> should fail when the branch does not exist"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no-such-branch"),
+        "stderr should name the missing branch; got: {stderr:?}"
+    );
+
+    // No slot should have been created or reset: any slug directory created
+    // under the pool root must contain no slot subdirectories.
+    if let Ok(entries) = std::fs::read_dir(env.bonsai_path.as_path()) {
+        for slug in entries.filter_map(|e| e.ok()) {
+            let slots: Vec<_> = std::fs::read_dir(slug.path())
+                .map(|d| d.filter_map(|e| e.ok()).collect())
+                .unwrap_or_default();
+            assert!(
+                slots.is_empty(),
+                "no worktree slot should be created for a non-existent branch, got: {slots:?}"
+            );
+        }
+    }
+}
+
+// ── positional branch: already checked out in another managed slot ──────────
+
+#[tokio::test]
+async fn get_positional_branch_already_checked_out_in_managed_slot_errors() {
+    let env = GitEnv::new().await;
+
+    // Provision a slot and check out `shared-branch` in it via -b.
+    let out = env
+        .bs()
+        .args(["get", "-b", "shared-branch"])
+        .output()
+        .expect("spawn bs get -b shared-branch");
+    assert!(out.status.success(), "initial bs get -b should succeed");
+    let claimed_slot = path_from_output(&out.stdout);
+
+    // Dirty the claimed slot so the next `bs get` cannot reuse it and is
+    // forced to provision a fresh slot when attempting the positional
+    // checkout.
+    std::fs::write(claimed_slot.join("dirty.txt"), "dirty").unwrap();
+
+    let out2 = env
+        .bs()
+        .args(["get", "shared-branch"])
+        .output()
+        .expect("spawn bs get shared-branch");
+
+    assert!(
+        !out2.status.success(),
+        "bs get <branch> should fail when the branch is checked out elsewhere"
+    );
+    let stderr = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr.contains(&claimed_slot.display().to_string()) || stderr.contains("shared-branch"),
+        "stderr should name the conflicting worktree path or branch; got: {stderr:?}"
+    );
+}
+
+// ── positional branch: already checked out in an unmanaged worktree ──────────
+
+#[tokio::test]
+async fn get_positional_branch_already_checked_out_in_unmanaged_worktree_errors() {
+    let env = GitEnv::new().await;
+
+    // Create a worktree OUTSIDE the bonsai pool, on the host, checked out on
+    // `unmanaged-branch`.
+    let unmanaged_dir = tempfile::TempDir::new().expect("unmanaged worktree dir");
+    let unmanaged_path = unmanaged_dir.path().join("wt");
+    let add_out = host_git(
+        &env.repo_path,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "unmanaged-branch",
+            unmanaged_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        add_out.status.success(),
+        "failed to create unmanaged worktree: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+
+    let out = env
+        .bs()
+        .args(["get", "unmanaged-branch"])
+        .output()
+        .expect("spawn bs get unmanaged-branch");
+
+    assert!(
+        !out.status.success(),
+        "bs get <branch> should fail when the branch is checked out in an unmanaged worktree"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(unmanaged_path.to_str().unwrap()) || stderr.contains("unmanaged-branch"),
+        "stderr should name the conflicting unmanaged worktree path or branch; got: {stderr:?}"
+    );
+}
+
+// ── positional branch vs -b/-B: clap mutual exclusion ───────────────────────
+
+#[tokio::test]
+async fn get_positional_branch_conflicts_with_dash_b() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-b", "foo", "existing-branch"])
+        .output()
+        .expect("spawn bs get -b foo existing-branch");
+
+    assert!(
+        !out.status.success(),
+        "positional branch + -b should be rejected by clap"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr should describe the mutual-exclusion constraint; got: {stderr:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_positional_branch_conflicts_with_dash_B() {
+    let env = GitEnv::new().await;
+
+    let out = env
+        .bs()
+        .args(["get", "-B", "foo", "existing-branch"])
+        .output()
+        .expect("spawn bs get -B foo existing-branch");
+
+    assert!(
+        !out.status.success(),
+        "positional branch + -B should be rejected by clap"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr should describe the mutual-exclusion constraint; got: {stderr:?}"
+    );
+}
+
+// ── Local helpers ──────────────────────────────────────────────────────────
 
 /// Return the short branch name of the worktree at `dir`, or `"HEAD"` for
 /// detached HEAD (mirrors `git rev-parse --abbrev-ref HEAD` output).

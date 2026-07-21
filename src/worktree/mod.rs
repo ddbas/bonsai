@@ -121,6 +121,11 @@ pub enum BranchMode {
     /// Create or reset a branch (`-B`). Overwrites an existing branch without
     /// error, mirroring `git checkout -B` semantics.
     Reset(String),
+    /// Check out an existing branch without creating or resetting it,
+    /// mirroring plain `git checkout <branch>` / `git worktree add <path> <branch>`
+    /// semantics. Fails naturally (via git's own error) if the branch does not
+    /// exist or is already checked out in another worktree.
+    Existing(String),
 }
 
 // -- Core utilities (section 2) -----------------------------------------------
@@ -802,6 +807,9 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
 /// - `branch = None` → `git -C <slot> checkout --detach <head_sha>` (detached HEAD)
 /// - `branch = Some(BranchMode::New(b))` → `git -C <slot> checkout -b <b> <head_sha>`
 /// - `branch = Some(BranchMode::Reset(b))` → `git -C <slot> checkout -B <b> <head_sha>`
+/// - `branch = Some(BranchMode::Existing(b))` → `git -C <slot> checkout <b>` (no
+///   `head_sha`; relies on git's own failure if `b` doesn't exist or is already
+///   checked out elsewhere)
 pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>) -> Result<()> {
     let slot_str = slot_path.to_string_lossy();
     let output = match branch {
@@ -817,6 +825,10 @@ pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>)
             .args(["-C", &slot_str, "checkout", "-B", name, head_sha])
             .output()
             .context("failed to spawn `git checkout -B`")?,
+        Some(BranchMode::Existing(name)) => git_cmd()
+            .args(["-C", &slot_str, "checkout", name])
+            .output()
+            .context("failed to spawn `git checkout`")?,
     };
 
     if !output.status.success() {
@@ -832,6 +844,9 @@ pub fn reset_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>)
 /// - `branch = None` → `git worktree add --detach <slot_path> <head_sha>`
 /// - `branch = Some(BranchMode::New(b))` → `git worktree add -b <b> <slot_path> <head_sha>`
 /// - `branch = Some(BranchMode::Reset(b))` → `git worktree add -B <b> <slot_path> <head_sha>`
+/// - `branch = Some(BranchMode::Existing(b))` → `git worktree add <slot_path> <b>`
+///   (no `--detach`, no `head_sha`; relies on git's own failure if `b` doesn't
+///   exist or is already checked out elsewhere)
 pub fn create_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>) -> Result<()> {
     let slot_str = slot_path.to_string_lossy();
     let output = match branch {
@@ -847,6 +862,10 @@ pub fn create_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>
             .args(["worktree", "add", "-B", name, &slot_str, head_sha])
             .output()
             .context("failed to spawn `git worktree add -B`")?,
+        Some(BranchMode::Existing(name)) => git_cmd()
+            .args(["worktree", "add", &slot_str, name])
+            .output()
+            .context("failed to spawn `git worktree add`")?,
     };
 
     if !output.status.success() {
