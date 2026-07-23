@@ -507,63 +507,15 @@ fn parse_lsof_pids(stdout: &str) -> usize {
     pids.len()
 }
 
-/// Filter out `lsof` diagnostic warnings that are irrelevant to the path
-/// being queried.
-///
-/// When `lsof` runs on a Linux host that has Docker containers active it
-/// emits lines such as:
-///
-/// ```text
-/// lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/…
-///       Output information may be incomplete.
-/// ```
-///
-/// These are cosmetic — they indicate that `lsof` skipped filesystems it
-/// could not inspect (Docker overlay2, nsfs network namespaces, etc.), but
-/// they say nothing about whether the *target path* has open file handles.
-/// Treating them as errors causes false failures on any Linux host that runs
-/// Docker containers alongside the test suite (e.g. GitHub Actions with
-/// testcontainers).
-///
-/// On macOS, `lsof` can also emit a standalone diagnostic line such as:
-///
-/// ```text
-/// assuming "dev=1000015" from mount table
-/// ```
-///
-/// This happens when `lsof` cannot resolve the device id for a mount via
-/// `getfsstat` (e.g. certain external volumes, network shares, or
-/// snapshot/backup filesystems) and falls back to a value read straight from
-/// the mount table. It is purely informational — it says nothing about open
-/// file handles on the target path — but unlike the Linux warnings above it
-/// is not prefixed with `lsof: WARNING:`, so it must be filtered separately.
-///
-/// Returns the subset of `stderr` lines that are genuine errors (i.e. not
-/// `lsof: WARNING:` lines, not the associated "Output information may be
-/// incomplete." continuation line, and not the macOS "assuming ... from
-/// mount table" diagnostic).
-fn lsof_real_errors(stderr: &str) -> String {
-    stderr
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with("lsof: WARNING:")
-                && trimmed != "Output information may be incomplete."
-                && !(trimmed.starts_with("assuming \"dev=")
-                    && trimmed.ends_with("from mount table"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Internal helper: run `lsof_bin +d <path>` and return the number of distinct
-/// PIDs with open file descriptors directly in `path` (non-recursive).
+/// Internal helper: run `lsof_bin -w +d <path>` and return the number of
+/// distinct PIDs with open file descriptors directly in `path`
+/// (non-recursive).
 ///
 /// Separated from `count_open_processes` so tests can pass a non-existent
 /// binary name without mutating the global `PATH` environment variable.
 fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
     let output = Command::new(lsof_bin)
-        .args(["+d", &path.to_string_lossy()])
+        .args(["-w", "+d", &path.to_string_lossy()])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -580,14 +532,13 @@ fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
     // stdout/stderr content as the authoritative signals.
     if output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Strip Docker/kernel WARNING lines that lsof emits on Linux hosts
-        // that have active containers (overlay2, nsfs filesystems).  They are
-        // unrelated to the target path and must not be treated as errors.
-        let real_errors = lsof_real_errors(&stderr);
-        if real_errors.trim().is_empty() {
+        // `-w` suppresses cosmetic warning diagnostics at the source, so any
+        // remaining stderr output is a genuine error.
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
             return Ok(0);
         } else {
-            bail!("lsof error for {}: {}", path.display(), real_errors.trim());
+            bail!("lsof error for {}: {}", path.display(), stderr);
         }
     }
 
@@ -598,7 +549,8 @@ fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
 /// Return the number of distinct PIDs that have open file descriptors directly
 /// in `path` (non-recursive; the top-level directory only).
 ///
-/// Uses `lsof +d <path>` to query open file handles.  A process whose current
+/// Uses `lsof -w +d <path>` to query open file handles (`-w` suppresses
+/// cosmetic warning diagnostics).  A process whose current
 /// working directory is `path` is detected; a process with handles only in
 /// subdirectories of `path` is **not** detected.  The PID (second
 /// whitespace-delimited column) of each non-header output line is collected
@@ -613,14 +565,14 @@ pub fn count_open_processes(path: &Path) -> Result<usize> {
     run_lsof_count("lsof", path)
 }
 
-/// Internal helper: run `lsof_bin +d <path>` and return whether any process
-/// has open file descriptors directly in `path` (non-recursive).
+/// Internal helper: run `lsof_bin -w +d <path>` and return whether any
+/// process has open file descriptors directly in `path` (non-recursive).
 ///
 /// Separated from `has_open_files` so tests can pass a non-existent binary
 /// name without mutating the global `PATH` environment variable.
 fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
     let output = Command::new(lsof_bin)
-        .args(["+d", &path.to_string_lossy()])
+        .args(["-w", "+d", &path.to_string_lossy()])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -637,34 +589,33 @@ fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
     // whether it found files or not.  We therefore use stdout/stderr content
     // as the authoritative signals:
     //
-    // 1. Non-empty stdout  → lsof found at least one open file descriptor
+    // 1. Non-empty stdout → lsof found at least one open file descriptor
     //    → `Ok(true)`.
-    // 2. Empty stdout + empty stderr (after stripping WARNING lines)
-    //    → no open file descriptors → `Ok(false)`.
-    // 3. Non-empty stderr (after stripping WARNING lines) → lsof encountered
-    //    a real error (e.g. the path does not exist, or a permission error)
-    //    → `Err(...)`.
+    // 2. Empty stdout + empty stderr → no open file descriptors →
+    //    `Ok(false)`.
+    // 3. Non-empty stderr → lsof encountered a real error (e.g. the path does
+    //    not exist, or a permission error) → `Err(...)`.
     //
-    // NOTE: on Linux hosts that run Docker containers (e.g. GitHub Actions
-    // with testcontainers) lsof emits WARNING lines about overlay2 and nsfs
-    // filesystems it cannot stat.  These are stripped by `lsof_real_errors`
-    // before deciding whether stderr contains a genuine error.
+    // `-w` suppresses cosmetic warning diagnostics (e.g. Docker overlay2/nsfs
+    // WARNING lines on Linux, macOS mount-table diagnostics) at the source,
+    // so any stderr output that remains is a genuine error.
     if !output.stdout.is_empty() {
         return Ok(true);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let real_errors = lsof_real_errors(&stderr);
-    if real_errors.trim().is_empty() {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
         Ok(false)
     } else {
-        bail!("lsof error for {}: {}", path.display(), real_errors.trim())
+        bail!("lsof error for {}: {}", path.display(), stderr)
     }
 }
 
 /// Detect whether any process currently has an open file descriptor directly
 /// in `path` (non-recursive; the top-level directory only).
 ///
-/// Uses `lsof +d <path>` to query open file handles.  A process whose current
+/// Uses `lsof -w +d <path>` to query open file handles (`-w` suppresses
+/// cosmetic warning diagnostics).  A process whose current
 /// working directory is `path` is detected; a process with handles only in
 /// subdirectories of `path` is **not** detected.  The result is determined by
 /// stdout/stderr content (not exit code, which `lsof` sets unreliably across
@@ -1405,65 +1356,6 @@ mod tests {
         assert!(
             err.to_string().contains("lsof"),
             "error message should mention 'lsof', got: {err}"
-        );
-    }
-
-    // -- lsof_real_errors: WARNING filtering ----------------------------------
-
-    /// Pure WARNING lines (as emitted by lsof on Linux with active Docker
-    /// containers) must be stripped; the result must be empty → no real error.
-    #[test]
-    fn lsof_real_errors_strips_docker_warnings() {
-        let stderr = "lsof: WARNING: can't stat() overlay file system \
-                      /var/lib/docker/overlay2/abc123/merged\n\
-                            Output information may be incomplete.\n\
-                      lsof: WARNING: can't stat() nsfs file system \
-                      /run/docker/netns/3d1fc9bb7349\n\
-                            Output information may be incomplete.\n";
-        let result = lsof_real_errors(stderr);
-        assert!(
-            result.trim().is_empty(),
-            "Docker WARNING lines should all be filtered out, got: {result:?}"
-        );
-    }
-
-    /// The macOS "assuming ... from mount table" diagnostic must be stripped;
-    /// the result must be empty → no real error.
-    #[test]
-    fn lsof_real_errors_strips_macos_mount_table_assumption() {
-        let stderr = "assuming \"dev=1000015\" from mount table\n";
-        let result = lsof_real_errors(stderr);
-        assert!(
-            result.trim().is_empty(),
-            "macOS mount table assumption line should be filtered out, got: {result:?}"
-        );
-    }
-
-    /// Real error messages (no WARNING prefix) must be preserved.
-    #[test]
-    fn lsof_real_errors_preserves_real_errors() {
-        let stderr = "lsof: no such file or directory: /nonexistent/path\n";
-        let result = lsof_real_errors(stderr);
-        assert!(
-            result.contains("no such file or directory"),
-            "real error line should be preserved, got: {result:?}"
-        );
-    }
-
-    /// Mix of WARNING lines and real error lines — only the real error survives.
-    #[test]
-    fn lsof_real_errors_mixed_keeps_real_error_only() {
-        let stderr = "lsof: WARNING: can't stat() overlay file system /var/lib/docker/x/merged\n\
-                            Output information may be incomplete.\n\
-                      lsof: some real error occurred\n";
-        let result = lsof_real_errors(stderr);
-        assert!(
-            result.contains("real error"),
-            "real error line must survive, got: {result:?}"
-        );
-        assert!(
-            !result.contains("WARNING"),
-            "WARNING lines must be stripped, got: {result:?}"
         );
     }
 
