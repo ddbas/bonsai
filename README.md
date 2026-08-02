@@ -21,9 +21,21 @@ $ bs get
 
 ```
 $ bs list
-available  ~/.bonsai/myrepo/a1b2c3d4
-in use     ~/.bonsai/myrepo/b5c6d7e8 (main)      ⚙2
-in use     ~/.bonsai/myrepo/c9d0e1f2 (my-feature)
+▶ ~/.bonsai/myrepo/a1b2c3d4 (current)  available
+  ~/.bonsai/myrepo/b5c6d7e8 (main)  in use
+  ~/.bonsai/myrepo/c9d0e1f2 (my-feature)  locked
+```
+
+```
+$ bs status ~/.bonsai/myrepo/b5c6d7e8
+🌳 ~/.bonsai/myrepo/b5c6d7e8  (main)
+status: in use
+
+open processes:
+  1234  node
+
+uncommitted changes (1):
+  M  src/main.rs
 ```
 
 ```

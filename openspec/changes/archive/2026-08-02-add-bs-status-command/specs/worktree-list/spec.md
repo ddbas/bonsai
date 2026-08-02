@@ -1,28 +1,4 @@
-## Purpose
-
-Provide a `bs list` subcommand (alias `bs ls`) that enumerates all
-bonsai-managed worktrees for the current repository's pool and displays each
-slot with a colour-coded availability badge, making it easy to inspect pool
-state without parsing raw git output. Detailed per-slot status (itemized lock
-reason, uncommitted/untracked files, and open processes) is available via
-`bs status <path>`.
-
-## Requirements
-
-### Requirement: `list` subcommand exists with `ls` alias
-
-The CLI SHALL expose a `list` subcommand. Running `bs list` SHALL be equivalent
-to running `bs ls`.
-
-#### Scenario: Invoke with `list`
-
-- **WHEN** the user runs `bs list`
-- **THEN** the process exits with code 0 and prints the worktree list to stdout
-
-#### Scenario: Invoke with `ls` alias
-
-- **WHEN** the user runs `bs ls`
-- **THEN** the process behaves identically to `bs list`
+## MODIFIED Requirements
 
 ### Requirement: Each worktree is shown on its own line with path, branch, and status badge
 
@@ -37,14 +13,7 @@ contain:
 2. A colored status badge — `available`, `in use`, or `locked` — reflecting the
    slot's classification, computed using the same priority rules as `bs status`
    (`locked` > `in use` > `available`), printed **before** the worktree path.
-   The badge SHALL be left-aligned and right-padded (based on its plain,
-   uncolored text) to a fixed column width equal to the length of the longest
-   possible badge string (`available`, 9 characters), so that the worktree path
-   column begins at the same screen column on every line regardless of which
-   badge is shown on that line. Color codes applied to the badge SHALL NOT
-   affect the padding width calculation.
-3. The worktree path (with home directory prefix replaced with `~`), starting at
-   the same fixed column on every line.
+3. The worktree path (with home directory prefix replaced with `~`).
 4. Optionally, the checked-out branch name in **bold parentheses** immediately
    after the path (omitted for detached HEAD).
 
@@ -98,22 +67,6 @@ three-way classification.
 - **THEN** `bs list` SHALL still display all slots without a current indicator,
   without producing an error
 
-#### Scenario: Path column is aligned across badges of different lengths
-
-- **WHEN** the pool contains at least one slot classified `available` (badge
-  text `"available"`, 9 characters) and at least one slot classified `in use` or
-  `locked` (badge text 6 characters)
-- **THEN** the worktree path SHALL begin at the same character column on every
-  printed line, regardless of that line's badge text length
-
-#### Scenario: Path column is aligned when the current-slot marker is present
-
-- **WHEN** the pool contains slots with different badge lengths and one of them
-  is prefixed with `▶` because it is the current slot
-- **THEN** the worktree path SHALL still begin at the same character column on
-  every printed line, since the `▶`/two-space prefix width is constant across
-  all rows and only the badge padding varies
-
 ### Requirement: `bs list` short-circuits per-slot availability checks
 
 For each slot, `bs list` SHALL determine the status badge using early-return
@@ -151,57 +104,7 @@ three-signal classification.
 - **THEN** `bs list` SHALL invoke `lsof` for that slot to distinguish `in use`
   from `available`
 
-### Requirement: Available status means clean, unlocked, and not opened by any process at the slot root
-
-A worktree slot's display status SHALL be determined as follows, in priority
-order:
-
-1. **`locked`** (yellow) — if the slot is git-locked, regardless of other
-   signals.
-2. **`in use`** (red) — if the slot is not locked but has uncommitted changes,
-   untracked files, or at least one process with an open file descriptor
-   directly in the slot root directory.
-3. **`available`** (green) — if the slot is not locked, its working tree is
-   clean, and no process has an open handle directly at the slot root.
-
-`lsof +d <slot>` (non-recursive) is used for process detection. Processes with
-open handles only in subdirectories of the slot root SHALL NOT cause the slot to
-be classified as `in use`. If `lsof` cannot be run, the CLI SHALL exit with a
-non-zero status and an actionable error message.
-
-#### Scenario: Locked slot shown as locked
-
-- **WHEN** a pool slot is git-locked
-- **THEN** `bs list` SHALL display it with a yellow `locked` badge
-
-#### Scenario: Locked and dirty slot shown as locked (not in use)
-
-- **WHEN** a pool slot is git-locked and also has uncommitted changes
-- **THEN** `bs list` SHALL display it with a yellow `locked` badge
-
-#### Scenario: Dirty slot (not locked) shown as in use
-
-- **WHEN** a pool slot has uncommitted changes and is not locked
-- **THEN** `bs list` SHALL display it with a red `in use` badge
-
-#### Scenario: Slot with shell CWD at root shown as in use
-
-- **WHEN** a slot is unlocked and clean
-- **WHEN** a shell process has CWD = the slot root
-- **THEN** `bs list` SHALL display it with a red `in use` badge
-
-#### Scenario: Slot with open handles only in subdirectory shown as available
-
-- **WHEN** a slot is unlocked and clean
-- **WHEN** a process has an open file descriptor only in a subdirectory (e.g. an
-  editor buffer at `<slot>/src/main.rs`) but NOT in the slot root itself
-- **THEN** `bs list` SHALL display it with a green `available` badge
-
-#### Scenario: Clean unlocked slot with no top-level open handles shown as available
-
-- **WHEN** a pool slot is unlocked, its working tree is clean, and no process
-  has an open handle directly in its root directory
-- **THEN** `bs list` SHALL display it with a green `available` badge
+## ADDED Requirements
 
 ### Requirement: `bs list` meets a documented performance SLO, calibrated per slot-state scenario
 
@@ -252,36 +155,16 @@ inherent `lsof`/`git status` floor for the all-available scenario (scenario 2).
   documented pre-change baseline margin, not merely for being slower than the
   locked/dirty scenarios' absolute bound
 
-### Requirement: Empty pool prints a friendly message
+## REMOVED Requirements
 
-If no worktree slots exist in the pool, `bs list` SHALL print a human-readable
-message to stdout indicating the pool is empty rather than printing nothing or
-returning an error.
+### Requirement: Per-slot status checks are performed concurrently
 
-#### Scenario: Pool directory does not exist
+**Reason**: Superseded by the early-return short-circuiting requirement above
+("`bs list` short-circuits per-slot availability checks"), which subsumes the
+concurrency requirement: per-slot classification is still performed concurrently
+(one thread per slot, as before), but each thread now also short-circuits
+internally instead of always running both `git status` and `lsof` to completion.
 
-- **WHEN** `~/.bonsai/<repo-slug>/` does not exist
-- **THEN** `bs list` exits with code 0 and prints a message indicating no
-  worktrees are managed for this repository
-
-#### Scenario: Pool directory exists but is empty
-
-- **WHEN** `~/.bonsai/<repo-slug>/` exists but contains no registered worktrees
-- **THEN** `bs list` exits with code 0 and prints a message indicating no
-  worktrees are managed for this repository
-
-### Requirement: Home directory prefix is displayed as `~`
-
-Paths displayed by `bs list` SHALL have the user's home directory prefix
-replaced with `~` for readability.
-
-#### Scenario: Path under home directory
-
-- **WHEN** a slot path is `/Users/alice/.bonsai/myrepo/a3f9c1b2`
-- **WHEN** the home directory is `/Users/alice`
-- **THEN** the displayed path SHALL be `~/.bonsai/myrepo/a3f9c1b2`
-
-#### Scenario: Path not under home directory
-
-- **WHEN** a slot path does not start with the home directory
-- **THEN** the full absolute path SHALL be displayed unchanged
+**Migration**: No action needed; the replacement requirement covers both the
+concurrency-across-slots behavior (unchanged) and the new short-circuiting
+behavior (new).
