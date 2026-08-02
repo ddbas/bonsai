@@ -79,17 +79,22 @@ async fn unlock_restores_available_status() {
         "bs unlock should print 'unlocked', got: {stdout:?}"
     );
 
-    // The slot should now appear as `available` in `bs list`.
-    let list_out = env.bs().arg("list").output().expect("spawn bs list");
-    assert!(list_out.status.success());
-    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    // The slot should now appear as `available` in `bs status`
+    // (`bs list` no longer prints a status badge).
+    let status_out = env
+        .bs()
+        .args(["status", slot_str])
+        .output()
+        .expect("spawn bs status");
+    assert!(status_out.status.success());
+    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        list_stdout.contains("available"),
-        "slot should be 'available' after unlock, got: {list_stdout:?}"
+        status_stdout.contains("available"),
+        "slot should be 'available' after unlock, got: {status_stdout:?}"
     );
     assert!(
-        !list_stdout.contains("locked"),
-        "slot should not show 'locked' after unlock, got: {list_stdout:?}"
+        !status_stdout.contains("locked"),
+        "slot should not show 'locked' after unlock, got: {status_stdout:?}"
     );
 }
 
@@ -164,21 +169,28 @@ async fn lock_unlock_defaults_to_current_slot() {
         String::from_utf8_lossy(&unlock_out.stderr)
     );
 
-    // Verify unlocked.
-    let list_out = env.bs().arg("list").output().expect("spawn bs list");
-    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    // Verify unlocked via `bs status` (badge/classification now lives there).
+    // Run from `repo_path` (not from inside `slot`) so the `bs status`
+    // process's own CWD doesn't register as an open handle at the slot root.
+    let status_out = env
+        .bs()
+        .args(["status", slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs status");
+    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        list_stdout.contains("available"),
-        "slot should be available after default bs unlock, got: {list_stdout:?}"
+        status_stdout.contains("available"),
+        "slot should be available after default bs unlock, got: {status_stdout:?}"
     );
 }
 
-// ── 6.5: bs list shows `locked` badge; locked+dirty stays `locked` ───────────
+// ── 6.5: bs status shows `locked` classification; locked+dirty stays `locked` ──
 
-/// A locked slot appears with a `locked` badge (not `in use`) in `bs list`.
-/// A locked slot that also has uncommitted changes is still shown as `locked`.
+/// A locked slot is reported as `locked` (not `in use`) by `bs status`.
+/// A locked slot that also has uncommitted changes is still reported as
+/// `locked`. `bs list` never shows a badge for either case.
 #[tokio::test]
-async fn list_shows_locked_badge_for_locked_slot() {
+async fn status_shows_locked_for_locked_slot() {
     let env = GitEnv::new().await;
     let slot = env.run_get();
 
@@ -190,35 +202,48 @@ async fn list_shows_locked_badge_for_locked_slot() {
         .expect("spawn bs lock");
     assert!(lock_out.status.success());
 
-    // `bs list` should show `locked`, not `in use`.
+    // `bs list` should show no badge at all.
     let list_out = env.bs().arg("list").output().expect("spawn bs list");
     assert!(list_out.status.success());
     let list_stdout = String::from_utf8_lossy(&list_out.stdout);
     assert!(
-        list_stdout.contains("locked"),
-        "bs list should show 'locked' badge for locked slot, got: {list_stdout:?}"
+        !list_stdout.contains("locked") && !list_stdout.contains("in use"),
+        "bs list must never show a status badge, got: {list_stdout:?}"
+    );
+
+    // `bs status` should show `locked`, not `in use`.
+    let status_out = env
+        .bs()
+        .args(["status", slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs status");
+    assert!(status_out.status.success());
+    let status_stdout = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        status_stdout.contains("locked"),
+        "bs status should show 'locked' for locked slot, got: {status_stdout:?}"
     );
     assert!(
-        !list_stdout.contains("in use"),
-        "bs list must not show 'in use' for a locked slot, got: {list_stdout:?}"
+        !status_stdout.contains("in use"),
+        "bs status must not show 'in use' for a locked slot, got: {status_stdout:?}"
     );
 
     // Now dirty the slot (locked + dirty should still show as `locked`).
     std::fs::write(slot.join("dirty.txt"), "dirty").expect("write dirty file");
 
-    let list_out2 = env
+    let status_out2 = env
         .bs()
-        .arg("list")
+        .args(["status", slot.to_str().unwrap()])
         .output()
-        .expect("spawn bs list (dirty)");
-    assert!(list_out2.status.success());
-    let list_stdout2 = String::from_utf8_lossy(&list_out2.stdout);
+        .expect("spawn bs status (dirty)");
+    assert!(status_out2.status.success());
+    let status_stdout2 = String::from_utf8_lossy(&status_out2.stdout);
     assert!(
-        list_stdout2.contains("locked"),
-        "locked+dirty slot should still show 'locked', got: {list_stdout2:?}"
+        status_stdout2.contains("locked"),
+        "locked+dirty slot should still show 'locked', got: {status_stdout2:?}"
     );
     assert!(
-        !list_stdout2.contains("in use"),
-        "locked+dirty slot must not show 'in use', got: {list_stdout2:?}"
+        !status_stdout2.contains("in use"),
+        "locked+dirty slot must not show 'in use', got: {status_stdout2:?}"
     );
 }

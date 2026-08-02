@@ -399,3 +399,26 @@ pub fn host_git(dir: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .unwrap_or_else(|e| panic!("host git {args:?} failed: {e}"))
 }
+
+/// Build a `PATH`-suitable directory that exposes only `git` (via a symlink
+/// to the host's real `git` binary) and no `lsof`.
+///
+/// Used to assert that a command does not shell out to `lsof`: run the
+/// command with this directory as its entire `PATH`; if it still needs
+/// `lsof`, spawning will fail with a "not found" error.
+pub fn git_only_path_dir() -> TempDir {
+    let real_git = {
+        let out = Command::new("which")
+            .arg("git")
+            .output()
+            .expect("failed to run `which git`");
+        assert!(out.status.success(), "`which git` failed to locate git");
+        PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+    };
+
+    let dir = TempDir::new().expect("temp dir for git-only PATH");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_git, dir.path().join("git"))
+        .expect("failed to symlink git into git-only PATH dir");
+    dir
+}

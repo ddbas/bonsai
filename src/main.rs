@@ -83,12 +83,37 @@ enum Commands {
         reset_branch: Option<String>,
     },
 
-    /// List all managed worktrees in the pool with their availability status.
+    /// List all managed worktrees in the pool.
     ///
-    /// Displays one line per slot: a coloured status badge followed by the
-    /// tilde-abbreviated path.  Green = available; red = in use.
+    /// Displays one line per slot: the tilde-abbreviated path, optionally
+    /// followed by the checked-out branch name in parentheses, with the
+    /// current slot marked with a `▶` prefix and `(current)` label. Only
+    /// parses `git worktree list --porcelain`; no per-slot `lsof` or
+    /// `git status` checks are performed, so this stays fast regardless of
+    /// pool size. Use `bs status [PATH]` for detailed lock/dirty/open-process
+    /// information about a single slot.
     #[command(alias = "ls")]
     List,
+
+    /// Show detailed status for a single managed worktree slot.
+    ///
+    /// Reports the slot's overall classification (`available` / `in use` /
+    /// `locked`, using the same priority rules `bs list` used to apply
+    /// before this command existed), plus itemized detail: the lock reason
+    /// (if locked), the individual `git status --porcelain` lines
+    /// (uncommitted and untracked), and the PID + command name of each
+    /// process with an open file handle directly at the slot root.
+    ///
+    /// `PATH` is optional; when omitted, `bs status` resolves the slot
+    /// containing the current working directory (same resolution as
+    /// `bs current`) and errors out if the CWD is not inside a managed slot.
+    /// When given, `PATH` must resolve to a bonsai-managed pool slot for the
+    /// current repository (validated the same way as `bs lock`/`bs unlock`).
+    Status {
+        /// Absolute path to the pool slot to inspect.
+        /// Defaults to the current slot when omitted.
+        path: Option<std::path::PathBuf>,
+    },
 
     /// Show the managed worktree slot that contains the current directory.
     ///
@@ -140,20 +165,6 @@ enum Commands {
     Info,
 }
 
-fn format_stats(stats: &worktree::WorktreeStats) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if stats.process_count > 0 {
-        parts.push(format!("\u{2699}{}", stats.process_count)); // ⚙
-    }
-    if stats.uncommitted_count > 0 {
-        parts.push(format!("\u{00b1}{}", stats.uncommitted_count)); // ±
-    }
-    if stats.untracked_count > 0 {
-        parts.push(format!("?{}", stats.untracked_count));
-    }
-    parts.join(" ")
-}
-
 fn format_current_path(tilde: &str, branch: Option<&str>) -> String {
     match branch {
         Some(b) => format!("{tilde}  ({})", b.bold()),
@@ -161,52 +172,61 @@ fn format_current_path(tilde: &str, branch: Option<&str>) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai::worktree::WorktreeStats;
+/// Render a [`worktree::SlotStatusReport`] to stdout in the plain-text,
+/// itemized format described by `bs status`'s spec: a header line with the
+/// path/branch, a classification line (with lock reason when locked), and
+/// itemized sections for open processes, uncommitted files, and untracked
+/// files (omitted when empty).
+fn print_status_report(report: &worktree::SlotStatusReport) {
+    let tilde = worktree::tilde_path(&report.path);
+    println!(
+        "🌳 {}",
+        format_current_path(&tilde, report.branch.as_deref())
+    );
 
-    fn stats(
-        process_count: usize,
-        uncommitted_count: usize,
-        untracked_count: usize,
-    ) -> WorktreeStats {
-        WorktreeStats {
-            process_count,
-            uncommitted_count,
-            untracked_count,
+    match report.status {
+        worktree::WorktreeStatus::Locked => {
+            println!("status: {}", "locked".yellow());
+            match &report.lock_reason {
+                Some(reason) => println!("lock reason: {reason}"),
+                None => println!("lock reason: none"),
+            }
+        }
+        worktree::WorktreeStatus::InUse => println!("status: {}", "in use".red()),
+        worktree::WorktreeStatus::Available => println!("status: {}", "available".green()),
+    }
+
+    if !report.processes.is_empty() {
+        println!();
+        println!("open processes:");
+        for process in &report.processes {
+            println!("  {}  {}", process.pid, process.command);
         }
     }
 
-    #[test]
-    fn format_stats_all_zero_is_empty() {
-        assert_eq!(format_stats(&stats(0, 0, 0)), "");
+    if !report.git_status.uncommitted.is_empty() {
+        println!();
+        println!(
+            "uncommitted changes ({}):",
+            report.git_status.uncommitted.len()
+        );
+        for line in &report.git_status.uncommitted {
+            println!("  {}  {}", line.code, line.path);
+        }
     }
 
-    #[test]
-    fn format_stats_all_three_non_zero() {
-        assert_eq!(format_stats(&stats(1, 2, 3)), "\u{2699}1 \u{00b1}2 ?3");
+    if !report.git_status.untracked.is_empty() {
+        println!();
+        println!("untracked files ({}):", report.git_status.untracked.len());
+        for line in &report.git_status.untracked {
+            println!("  {}  {}", line.code, line.path);
+        }
     }
+}
 
-    #[test]
-    fn format_stats_only_processes() {
-        assert_eq!(format_stats(&stats(5, 0, 0)), "\u{2699}5");
-    }
-
-    #[test]
-    fn format_stats_only_uncommitted() {
-        assert_eq!(format_stats(&stats(0, 3, 0)), "\u{00b1}3");
-    }
-
-    #[test]
-    fn format_stats_only_untracked() {
-        assert_eq!(format_stats(&stats(0, 0, 4)), "?4");
-    }
-
-    #[test]
-    fn format_stats_processes_and_untracked_skip_uncommitted() {
-        assert_eq!(format_stats(&stats(2, 0, 4)), "\u{2699}2 ?4");
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     // -- column alignment helpers --------------------------------------------
 
@@ -381,7 +401,7 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let entries = worktree::list_worktrees_status(&pool_dir)?;
+            let entries = worktree::list_pool_worktrees(&pool_dir)?;
 
             if entries.is_empty() {
                 println!("No worktrees managed for this repository.");
@@ -393,113 +413,41 @@ fn run() -> anyhow::Result<()> {
             let current_path: Option<std::path::PathBuf> =
                 worktree::current_worktree().ok().flatten().map(|(p, _)| p);
 
-            // Two-pass rendering: collect rows first so we can measure
-            // the widest path+branch string and pad all rows to the same
-            // column width before printing the stats column.
-            struct Row<'a> {
-                status: &'a worktree::WorktreeStatus,
-                /// Path + optional bold branch + optional " (current)" label.
-                path_display: String,
-                /// Visible character width of `path_display` (no ANSI codes).
-                visible_width: usize,
-                stats_str: String,
-                is_current: bool,
+            for entry in &entries {
+                let tilde = worktree::tilde_path(&entry.path);
+                let is_current = current_path.as_deref() == Some(entry.path.as_path());
+                let prefix = if is_current { "▶ " } else { "  " };
+                let path_display = match &entry.branch {
+                    Some(b) if is_current => {
+                        format!("{} ({}) (current)", tilde, b.bold())
+                    }
+                    Some(b) => format!("{} ({})", tilde, b.bold()),
+                    None if is_current => format!("{} (current)", tilde),
+                    None => tilde,
+                };
+                println!("{}{}", prefix, path_display);
             }
+        }
 
-            let rows: Vec<Row<'_>> = entries
-                .iter()
-                .map(|(path, status, stats, branch)| {
-                    let tilde = worktree::tilde_path(path);
-                    let is_current = current_path.as_deref() == Some(path.as_path());
-                    // Visible width: tilde chars + " (" + branch + ")" if present,
-                    // plus " (current)" (10 chars) when this is the active slot.
-                    let base_width = match branch {
-                        Some(b) => tilde.chars().count() + 3 + b.chars().count(),
-                        None => tilde.chars().count(),
-                    };
-                    let visible_width = base_width;
-                    let path_display = match branch {
-                        Some(b) => format!("{} ({})", tilde, b.bold()),
-                        None => tilde,
-                    };
-                    Row {
-                        status,
-                        path_display,
-                        visible_width,
-                        stats_str: format_stats(stats),
-                        is_current,
-                    }
-                })
-                .collect();
+        Some(Commands::Status { path }) => {
+            let root = worktree::managed_root()?;
+            let slug = worktree::repo_slug()?;
+            let pool_dir = root.join(&slug);
 
-            let max_width = rows.iter().map(|r| r.visible_width).max().unwrap_or(0);
+            let target = match path {
+                Some(p) => p,
+                None => match worktree::current_worktree()? {
+                    Some((p, _)) => p,
+                    None => anyhow::bail!(
+                        "not inside a managed bonsai pool slot; \
+                         please provide a path argument"
+                    ),
+                },
+            };
 
-            for row in &rows {
-                let pad = " ".repeat(max_width - row.visible_width);
-                let prefix = if row.is_current { "▶ " } else { "  " };
-                match row.status {
-                    worktree::WorktreeStatus::Locked => {
-                        if row.stats_str.is_empty() {
-                            println!(
-                                "{}{}     {}{}",
-                                prefix,
-                                "locked".yellow(),
-                                row.path_display,
-                                pad
-                            );
-                        } else {
-                            println!(
-                                "{}{}     {}{}  {}",
-                                prefix,
-                                "locked".yellow(),
-                                row.path_display,
-                                pad,
-                                row.stats_str
-                            );
-                        }
-                    }
-                    worktree::WorktreeStatus::Available => {
-                        if row.stats_str.is_empty() {
-                            println!(
-                                "{}{}  {}{}",
-                                prefix,
-                                "available".green(),
-                                row.path_display,
-                                pad
-                            );
-                        } else {
-                            println!(
-                                "{}{}  {}{}  {}",
-                                prefix,
-                                "available".green(),
-                                row.path_display,
-                                pad,
-                                row.stats_str
-                            );
-                        }
-                    }
-                    worktree::WorktreeStatus::InUse => {
-                        if row.stats_str.is_empty() {
-                            println!(
-                                "{}{}     {}{}",
-                                prefix,
-                                "in use".red(),
-                                row.path_display,
-                                pad
-                            );
-                        } else {
-                            println!(
-                                "{}{}     {}{}  {}",
-                                prefix,
-                                "in use".red(),
-                                row.path_display,
-                                pad,
-                                row.stats_str
-                            );
-                        }
-                    }
-                }
-            }
+            worktree::validate_pool_slot(&target, &pool_dir)?;
+            let report = worktree::slot_status(&target)?;
+            print_status_report(&report);
         }
 
         Some(Commands::Current) => match worktree::current_worktree()? {

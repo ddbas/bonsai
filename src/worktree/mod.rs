@@ -65,9 +65,63 @@ pub(crate) fn slugify(name: &str) -> String {
 pub struct WorktreeEntry {
     pub path: PathBuf,
     pub locked: bool,
+    /// The optional reason text passed to `git worktree lock --reason`, when
+    /// the slot is locked. `None` when unlocked, or locked with no reason.
+    pub lock_reason: Option<String>,
     /// The checked-out branch name (short form, e.g. `main`), or `None` for
     /// detached HEAD.
     pub branch: Option<String>,
+}
+
+/// A single distinct process with an open file descriptor directly in a
+/// slot's root (non-recursive), as reported by `lsof -w +d <path>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessHandle {
+    /// Process ID, as reported by `lsof` (kept as a string; not parsed to a
+    /// numeric type since it is only ever displayed, never computed with).
+    pub pid: String,
+    /// Command name (`lsof`'s `COMMAND` column).
+    pub command: String,
+}
+
+/// A single classified line from `git status --porcelain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStatusLine {
+    /// The two-character XY status code (e.g. ` M`, `??`, `A `).
+    pub code: String,
+    /// The file path as reported by git (rename entries include the full
+    /// ` -> ` arrow text verbatim).
+    pub path: String,
+}
+
+/// Detailed `git status --porcelain` output for a slot, split into
+/// uncommitted (non-`??` XY code) and untracked (`??` XY code) lines.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GitStatusDetail {
+    pub uncommitted: Vec<GitStatusLine>,
+    pub untracked: Vec<GitStatusLine>,
+}
+
+/// Detailed status report for a single managed pool worktree slot, combining
+/// lock state (+ reason), git-status detail, and open-process detail.
+///
+/// Built by [`slot_status`]; rendered by the `bs status` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotStatusReport {
+    pub path: PathBuf,
+    /// The checked-out branch name, or `None` for detached HEAD.
+    pub branch: Option<String>,
+    /// Overall classification, using the same priority rules `bs list` used
+    /// to apply: `Locked` > `InUse` > `Available`.
+    pub status: WorktreeStatus,
+    /// The lock's `--reason` text, when the slot is locked and a reason was
+    /// given.
+    pub lock_reason: Option<String>,
+    /// Distinct processes with an open file descriptor directly in the slot
+    /// root.
+    pub processes: Vec<ProcessHandle>,
+    /// Itemized uncommitted/untracked `git status --porcelain` lines.
+    pub git_status: GitStatusDetail,
 }
 
 /// Counts of open processes and dirty/untracked files for a pool worktree slot.
@@ -299,6 +353,29 @@ pub fn tilde_path(path: &Path) -> String {
 
 // -- Pool scan (section 3) ----------------------------------------------------
 
+/// Parse a `locked` line from `git worktree list --porcelain` output.
+///
+/// The line is always `locked` when the slot is locked with no reason, or
+/// `locked <reason text>` when locked with `git worktree lock --reason`.
+/// Returns `(is_locked, reason)`; `reason` is `None` when no reason text
+/// follows `locked`.
+fn parse_locked_line(line: &str) -> (bool, Option<String>) {
+    match line.strip_prefix("locked") {
+        Some(rest) => {
+            let reason = rest.trim();
+            (
+                true,
+                if reason.is_empty() {
+                    None
+                } else {
+                    Some(reason.to_string())
+                },
+            )
+        }
+        None => (false, None),
+    }
+}
+
 /// Internal: parse `git worktree list --porcelain` once; return the filtered
 /// pool entries and a stale flag.
 ///
@@ -327,6 +404,7 @@ fn list_pool_worktrees_checking_stale(pool_dir: &Path) -> Result<(Vec<WorktreeEn
     let mut has_stale = false;
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_locked = false;
+    let mut cur_lock_reason: Option<String> = None;
     let mut cur_branch: Option<String> = None;
 
     // Inline flush: called when a new `worktree ` header line is hit and once
@@ -342,11 +420,13 @@ fn list_pool_worktrees_checking_stale(pool_dir: &Path) -> Result<(Vec<WorktreeEn
                     entries.push(WorktreeEntry {
                         path: canonical,
                         locked: cur_locked,
+                        lock_reason: cur_lock_reason.take(),
                         branch: cur_branch.take(),
                     });
                 } else {
-                    // Non-pool entry: branch is irrelevant; drop it.
+                    // Non-pool entry: branch/reason are irrelevant; drop them.
                     let _ = cur_branch.take();
+                    let _ = cur_lock_reason.take();
                 }
             }
         };
@@ -357,9 +437,12 @@ fn list_pool_worktrees_checking_stale(pool_dir: &Path) -> Result<(Vec<WorktreeEn
             flush!();
             cur_path = Some(PathBuf::from(rest.trim()));
             cur_locked = false;
+            cur_lock_reason = None;
             cur_branch = None;
         } else if line.starts_with("locked") {
-            cur_locked = true;
+            let (locked, reason) = parse_locked_line(line);
+            cur_locked = locked;
+            cur_lock_reason = reason;
         } else if let Some(refs) = line.strip_prefix("branch ") {
             let short = refs
                 .trim()
@@ -381,15 +464,10 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(entries)
 }
 
-/// Count the uncommitted (modified/staged) and untracked files in `slot_path`.
-///
-/// Runs `git -C <slot_path> status --porcelain` and classifies each output
-/// line by its two-character XY status code:
-/// - Lines where XY == `??` → untracked files.
-/// - All other non-empty lines → modified or staged files.
-///
-/// Returns `(uncommitted_count, untracked_count)`.
-pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
+/// Internal: run `git status --porcelain` for `slot_path` once and return the
+/// raw stdout text. Shared by [`count_git_status_files`] and
+/// [`git_status_lines`] so the subprocess invocation is not duplicated.
+fn run_git_status_porcelain(slot_path: &Path) -> Result<String> {
     let output = git_cmd()
         .args(["-C", &slot_path.to_string_lossy(), "status", "--porcelain"])
         .output()
@@ -404,7 +482,19 @@ pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
         );
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Count the uncommitted (modified/staged) and untracked files in `slot_path`.
+///
+/// Runs `git -C <slot_path> status --porcelain` and classifies each output
+/// line by its two-character XY status code:
+/// - Lines where XY == `??` → untracked files.
+/// - All other non-empty lines → modified or staged files.
+///
+/// Returns `(uncommitted_count, untracked_count)`.
+pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
+    let text = run_git_status_porcelain(slot_path)?;
     let mut uncommitted = 0usize;
     let mut untracked = 0usize;
     for line in text.lines() {
@@ -415,6 +505,38 @@ pub fn count_git_status_files(slot_path: &Path) -> Result<(usize, usize)> {
         }
     }
     Ok((uncommitted, untracked))
+}
+
+/// Return the individual `git status --porcelain` lines for `slot_path`,
+/// split into uncommitted (non-`??` XY code) and untracked (`??` XY code)
+/// entries.
+///
+/// Reuses the same subprocess invocation as [`count_git_status_files`] (via
+/// [`run_git_status_porcelain`]) but keeps the per-line detail (status code +
+/// path) instead of collapsing to counts.
+pub fn git_status_lines(slot_path: &Path) -> Result<GitStatusDetail> {
+    let text = run_git_status_porcelain(slot_path)?;
+    let mut detail = GitStatusDetail::default();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let (code, path) = if line.len() >= 3 {
+            (line[..2].to_string(), line[3..].to_string())
+        } else if line.len() >= 2 {
+            (line[..2].to_string(), String::new())
+        } else {
+            (line.to_string(), String::new())
+        };
+        let is_untracked = code == "??";
+        let entry = GitStatusLine { code, path };
+        if is_untracked {
+            detail.untracked.push(entry);
+        } else {
+            detail.uncommitted.push(entry);
+        }
+    }
+    Ok(detail)
 }
 
 /// Return the availability status and usage stats of every pool worktree slot.
@@ -488,6 +610,57 @@ pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> 
         .collect()
 }
 
+/// Compute a detailed status report for a single managed pool worktree slot.
+///
+/// `path` must already be a canonicalizable, registered git worktree (callers
+/// resolve/validate the slot first via [`current_worktree`] or
+/// [`validate_pool_slot`]). Combines:
+/// - lock state + reason, from `git worktree list --porcelain` (reusing
+///   [`list_pool_worktrees_checking_stale`], scoped to just this one slot by
+///   passing the slot's own canonical path as the "pool" filter),
+/// - itemized `git status --porcelain` lines, via [`git_status_lines`],
+/// - itemized open-process detail, via [`list_open_processes`],
+///
+/// and derives the overall [`WorktreeStatus`] classification using the same
+/// priority rules `bs list` used to apply: `Locked` > `InUse` > `Available`.
+pub fn slot_status(path: &Path) -> Result<SlotStatusReport> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize slot path {}", path.display()))?;
+
+    // Scoping the "pool" filter to the slot's own path means only this one
+    // worktree entry (if any) passes the `starts_with` check inside
+    // `list_pool_worktrees_checking_stale`.
+    let (entries, _has_stale) = list_pool_worktrees_checking_stale(&canonical)?;
+    let entry = entries
+        .into_iter()
+        .find(|e| e.path == canonical)
+        .ok_or_else(|| {
+            anyhow::anyhow!("{} is not a registered git worktree", canonical.display())
+        })?;
+
+    let processes = list_open_processes(&canonical)?;
+    let git_status = git_status_lines(&canonical)?;
+
+    let is_clean = git_status.uncommitted.is_empty() && git_status.untracked.is_empty();
+    let status = if entry.locked {
+        WorktreeStatus::Locked
+    } else if !processes.is_empty() || !is_clean {
+        WorktreeStatus::InUse
+    } else {
+        WorktreeStatus::Available
+    };
+
+    Ok(SlotStatusReport {
+        path: canonical,
+        branch: entry.branch,
+        status,
+        lock_reason: entry.lock_reason,
+        processes,
+        git_status,
+    })
+}
+
 /// Parse PID fields from `lsof +D` stdout and return the count of distinct PIDs.
 ///
 /// Skips the header line (starts with `COMMAND`). The PID is the second
@@ -507,13 +680,40 @@ fn parse_lsof_pids(stdout: &str) -> usize {
     pids.len()
 }
 
-/// Internal helper: run `lsof_bin -w +d <path>` and return the number of
-/// distinct PIDs with open file descriptors directly in `path`
-/// (non-recursive).
+/// Parse `(pid, command)` pairs from `lsof +d` stdout, deduplicated by PID
+/// (first occurrence wins), preserving first-seen order.
 ///
-/// Separated from `count_open_processes` so tests can pass a non-existent
-/// binary name without mutating the global `PATH` environment variable.
-fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
+/// Skips the header line (starts with `COMMAND`). The command name is the
+/// first whitespace-delimited field; the PID is the second.
+fn parse_lsof_processes(stdout: &str) -> Vec<ProcessHandle> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut result = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with("COMMAND") {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let Some(command) = fields.next() else {
+            continue;
+        };
+        let Some(pid) = fields.next() else {
+            continue;
+        };
+        if seen.insert(pid.to_string()) {
+            result.push(ProcessHandle {
+                pid: pid.to_string(),
+                command: command.to_string(),
+            });
+        }
+    }
+    result
+}
+
+/// Internal: run `lsof_bin -w +d <path>` once and return the raw stdout text,
+/// or `Ok(String::new())` when no files are open. Shared by
+/// [`run_lsof_count`] and [`run_lsof_processes`] so the subprocess
+/// invocation and its stdout/stderr interpretation live in one place.
+fn run_lsof_raw(lsof_bin: &str, path: &Path) -> Result<String> {
     let output = Command::new(lsof_bin)
         .args(["-w", "+d", &path.to_string_lossy()])
         .output()
@@ -536,14 +736,35 @@ fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
         // remaining stderr output is a genuine error.
         let stderr = stderr.trim();
         if stderr.is_empty() {
-            return Ok(0);
+            return Ok(String::new());
         } else {
             bail!("lsof error for {}: {}", path.display(), stderr);
         }
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Internal helper: run `lsof_bin -w +d <path>` and return the number of
+/// distinct PIDs with open file descriptors directly in `path`
+/// (non-recursive).
+///
+/// Separated from `count_open_processes` so tests can pass a non-existent
+/// binary name without mutating the global `PATH` environment variable.
+fn run_lsof_count(lsof_bin: &str, path: &Path) -> Result<usize> {
+    let text = run_lsof_raw(lsof_bin, path)?;
     Ok(parse_lsof_pids(&text))
+}
+
+/// Internal helper: run `lsof_bin -w +d <path>` and return the distinct
+/// `(pid, command)` pairs with open file descriptors directly in `path`
+/// (non-recursive).
+///
+/// Separated from `list_open_processes` so tests can pass a non-existent
+/// binary name without mutating the global `PATH` environment variable.
+fn run_lsof_processes(lsof_bin: &str, path: &Path) -> Result<Vec<ProcessHandle>> {
+    let text = run_lsof_raw(lsof_bin, path)?;
+    Ok(parse_lsof_processes(&text))
 }
 
 /// Return the number of distinct PIDs that have open file descriptors directly
@@ -565,50 +786,26 @@ pub fn count_open_processes(path: &Path) -> Result<usize> {
     run_lsof_count("lsof", path)
 }
 
+/// Return the distinct processes (PID + command name) with an open file
+/// descriptor directly in `path` (non-recursive; the top-level directory
+/// only), deduplicated by PID.
+///
+/// Reuses the same subprocess invocation as [`count_open_processes`] (via
+/// [`run_lsof_raw`]) but keeps the per-process detail instead of collapsing
+/// to a count. Error semantics are identical to [`count_open_processes`].
+pub fn list_open_processes(path: &Path) -> Result<Vec<ProcessHandle>> {
+    run_lsof_processes("lsof", path)
+}
+
 /// Internal helper: run `lsof_bin -w +d <path>` and return whether any
 /// process has open file descriptors directly in `path` (non-recursive).
 ///
 /// Separated from `has_open_files` so tests can pass a non-existent binary
-/// name without mutating the global `PATH` environment variable.
+/// name without mutating the global `PATH` environment variable. Reuses
+/// [`run_lsof_raw`] for the actual subprocess invocation.
 fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
-    let output = Command::new(lsof_bin)
-        .args(["-w", "+d", &path.to_string_lossy()])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "lsof not found on PATH — install lsof to use bs \
-                     (e.g. brew install lsof)"
-                )
-            } else {
-                anyhow::anyhow!("failed to spawn lsof: {}", e)
-            }
-        })?;
-
-    // `lsof +D` exits with a non-zero status code on macOS regardless of
-    // whether it found files or not.  We therefore use stdout/stderr content
-    // as the authoritative signals:
-    //
-    // 1. Non-empty stdout → lsof found at least one open file descriptor
-    //    → `Ok(true)`.
-    // 2. Empty stdout + empty stderr → no open file descriptors →
-    //    `Ok(false)`.
-    // 3. Non-empty stderr → lsof encountered a real error (e.g. the path does
-    //    not exist, or a permission error) → `Err(...)`.
-    //
-    // `-w` suppresses cosmetic warning diagnostics (e.g. Docker overlay2/nsfs
-    // WARNING lines on Linux, macOS mount-table diagnostics) at the source,
-    // so any stderr output that remains is a genuine error.
-    if !output.stdout.is_empty() {
-        return Ok(true);
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        Ok(false)
-    } else {
-        bail!("lsof error for {}: {}", path.display(), stderr)
-    }
+    let text = run_lsof_raw(lsof_bin, path)?;
+    Ok(!text.is_empty())
 }
 
 /// Detect whether any process currently has an open file descriptor directly
@@ -1190,6 +1387,142 @@ mod tests {
             None
         };
         assert!(branch.is_none());
+    }
+
+    // -- parse_locked_line ---------------------------------------------------
+
+    #[test]
+    fn parse_locked_line_no_lock() {
+        let (locked, reason) = parse_locked_line("branch refs/heads/main");
+        assert!(!locked);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn parse_locked_line_locked_no_reason() {
+        let (locked, reason) = parse_locked_line("locked");
+        assert!(locked);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn parse_locked_line_locked_with_reason() {
+        let (locked, reason) = parse_locked_line("locked build in progress");
+        assert!(locked);
+        assert_eq!(reason.as_deref(), Some("build in progress"));
+    }
+
+    // -- git_status_lines parsing ---------------------------------------------
+
+    /// Mirrors `git_status_lines`'s per-line classification without requiring
+    /// a live git repository, following the same synthetic-parsing pattern
+    /// already used for `count_git_status_files`.
+    fn synthetic_git_status_lines(porcelain: &str) -> GitStatusDetail {
+        let mut detail = GitStatusDetail::default();
+        for line in porcelain.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let (code, path) = if line.len() >= 3 {
+                (line[..2].to_string(), line[3..].to_string())
+            } else if line.len() >= 2 {
+                (line[..2].to_string(), String::new())
+            } else {
+                (line.to_string(), String::new())
+            };
+            let is_untracked = code == "??";
+            let entry = GitStatusLine { code, path };
+            if is_untracked {
+                detail.untracked.push(entry);
+            } else {
+                detail.uncommitted.push(entry);
+            }
+        }
+        detail
+    }
+
+    #[test]
+    fn git_status_lines_classifies_modified_and_untracked() {
+        let porcelain = " M src/main.rs\n?? build/\nA  new_file.rs\n?? tmp/\n";
+        let detail = synthetic_git_status_lines(porcelain);
+        assert_eq!(detail.uncommitted.len(), 2);
+        assert_eq!(detail.untracked.len(), 2);
+        assert_eq!(detail.uncommitted[0].path, "src/main.rs");
+        assert_eq!(detail.untracked[0].path, "build/");
+    }
+
+    #[test]
+    fn git_status_lines_empty_output() {
+        let detail = synthetic_git_status_lines("");
+        assert!(detail.uncommitted.is_empty());
+        assert!(detail.untracked.is_empty());
+    }
+
+    // -- parse_lsof_processes --------------------------------------------------
+
+    #[test]
+    fn parse_lsof_processes_deduplicates_by_pid() {
+        let mock_output = "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n\
+                           vim       100 user  cwd    DIR    1,2      512  123 /tmp/dir\n\
+                           vim       100 user  txt    REG    1,2     4096  456 /tmp/dir/f1\n\
+                           bash      200 user  txt    REG    1,2     4096  789 /tmp/dir/f2\n";
+        let processes = parse_lsof_processes(mock_output);
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, "100");
+        assert_eq!(processes[0].command, "vim");
+        assert_eq!(processes[1].pid, "200");
+        assert_eq!(processes[1].command, "bash");
+    }
+
+    #[test]
+    fn parse_lsof_processes_empty_output() {
+        assert!(parse_lsof_processes("").is_empty());
+    }
+
+    /// A file held open in a temp dir is reported with the correct PID by
+    /// `list_open_processes`.
+    #[test]
+    fn list_open_processes_returns_current_pid_when_file_open() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let file_path = dir.path().join("held_open.txt");
+        fs::write(&file_path, b"data").expect("write");
+        let _handle = fs::File::open(&file_path).expect("open file");
+
+        let processes =
+            list_open_processes(dir.path()).expect("list_open_processes should not error");
+        assert_eq!(
+            processes.len(),
+            1,
+            "one process (this test) holds the file open"
+        );
+        assert_eq!(processes[0].pid, std::process::id().to_string());
+    }
+
+    #[test]
+    fn list_open_processes_returns_empty_when_no_open_files() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+
+        let processes =
+            list_open_processes(dir.path()).expect("list_open_processes should not error");
+        assert!(processes.is_empty());
+    }
+
+    #[test]
+    fn list_open_processes_err_when_lsof_not_found() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let err = run_lsof_processes("/nonexistent/path/to/lsof-binary-xyz", dir.path())
+            .expect_err("run_lsof_processes should return Err when the binary is not found");
+        assert!(
+            err.to_string().contains("lsof"),
+            "error message should mention 'lsof', got: {err}"
+        );
     }
 
     // -- count_git_status_files parsing -------------------------------------

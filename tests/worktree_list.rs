@@ -47,14 +47,14 @@ async fn ls_alias_behaves_like_list() {
     );
 }
 
-// ── 4.2: one available slot ───────────────────────────────────────────────────
+// ── 4.2: one slot, path/branch/current only ───────────────────────────────────
 
-/// After `bs get` creates a clean slot, `bs list` reports it as `available`.
+/// After `bs get` creates a slot, `bs list` shows its path and no status badge
+/// or stats column.
 #[tokio::test]
-async fn list_one_available_slot() {
+async fn list_one_slot_shows_path_only() {
     let env = GitEnv::new().await;
 
-    // Create a slot (clean by default).
     let slot = env.run_get();
 
     let out = env.bs().arg("list").output().expect("spawn bs list");
@@ -66,13 +66,13 @@ async fn list_one_available_slot() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
 
+    // No status badges should ever appear now that `bs list` no longer
+    // classifies slots.
     assert!(
-        stdout.contains("available"),
-        "expected 'available' badge in output, got: {stdout:?}"
+        !stdout.contains("available") && !stdout.contains("in use") && !stdout.contains("locked"),
+        "bs list must not print a status badge, got: {stdout:?}"
     );
 
-    // The slot path should appear with a `~` prefix (BONSAI_ROOT is a TempDir
-    // under the real home dir on the test host, so tilde_path should apply).
     let slot_name = slot.file_name().unwrap().to_str().unwrap();
     assert!(
         stdout.contains(slot_name),
@@ -80,14 +80,13 @@ async fn list_one_available_slot() {
     );
 }
 
-// ── 4.4: branch and stats display ───────────────────────────────────────────
+// ── 4.4: branch display, no stats column ─────────────────────────────────────
 
-/// After `bs get` provisions a slot in detached HEAD, we manually attach a
-/// branch to the slot with `host_git`, add an untracked file, and verify:
-/// - the branch name appears in `bs list` output
-/// - the stats column shows `?1`
+/// After `bs get` provisions a slot in detached HEAD, attaching a branch and
+/// adding an untracked file should show the branch name in `bs list` output
+/// but never a stats column (that detail now lives in `bs status`).
 #[tokio::test]
-async fn list_shows_branch_and_untracked_stats() {
+async fn list_shows_branch_but_no_stats_column() {
     let env = GitEnv::new().await;
     let slot = env.run_get();
 
@@ -99,7 +98,7 @@ async fn list_shows_branch_and_untracked_stats() {
         String::from_utf8_lossy(&attach.stderr)
     );
 
-    // Add an untracked file.
+    // Add an untracked file — this must NOT show up as a stats icon anymore.
     std::fs::write(slot.join("untracked.txt"), "hello").expect("write untracked file");
 
     let out = env.bs().arg("list").output().expect("spawn bs list");
@@ -116,52 +115,18 @@ async fn list_shows_branch_and_untracked_stats() {
         "expected branch name 'feature/my-work' in output, got: {stdout:?}"
     );
     assert!(
-        stdout.contains("?1"),
-        "expected untracked stat '?1' in output, got: {stdout:?}"
-    );
-}
-
-/// A slot with a branch attached and a clean working tree shows the branch
-/// name with an `available` badge and no stat icons.
-#[tokio::test]
-async fn list_available_slot_shows_branch_no_stats() {
-    let env = GitEnv::new().await;
-    let slot = env.run_get();
-
-    // Attach a branch without touching any files (slot stays clean).
-    let attach = common::host_git(&slot, &["checkout", "-b", "clean-branch"]);
-    assert!(
-        attach.status.success(),
-        "git checkout -b failed: {}",
-        String::from_utf8_lossy(&attach.stderr)
-    );
-
-    let out = env.bs().arg("list").output().expect("spawn bs list");
-    assert!(out.status.success());
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-
-    assert!(
-        stdout.contains("clean-branch"),
-        "expected branch name 'clean-branch' in output, got: {stdout:?}"
-    );
-    assert!(
-        stdout.contains("available"),
-        "expected 'available' badge, got: {stdout:?}"
-    );
-    // No stat icons should be present for a clean slot.
-    assert!(
         !stdout.contains("?1") && !stdout.contains('\u{00b1}') && !stdout.contains('\u{2699}'),
-        "clean slot should have no stat icons, got: {stdout:?}"
+        "bs list must never show stat icons, got: {stdout:?}"
     );
 }
 
-/// A slot with an untracked/modified file is reported as `in use`.
+/// A dirty, locked, or busy slot is displayed identically to a clean one in
+/// `bs list` — only path/branch/current marker, no badge — regardless of the
+/// slot's underlying state.
 #[tokio::test]
-async fn list_dirty_slot_shown_as_in_use() {
+async fn list_dirty_slot_has_no_badge_or_stats() {
     let env = GitEnv::new().await;
 
-    // Obtain a slot then dirty it.
     let slot = env.run_get();
     std::fs::write(slot.join("dirty.txt"), "dirty").expect("write dirty file");
 
@@ -174,7 +139,36 @@ async fn list_dirty_slot_shown_as_in_use() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("in use"),
-        "expected 'in use' badge for dirty slot, got: {stdout:?}"
+        !stdout.contains("available") && !stdout.contains("in use") && !stdout.contains("locked"),
+        "bs list must not print a status badge for a dirty slot, got: {stdout:?}"
+    );
+}
+
+// ── 4.1: bs list does not shell out to lsof ──────────────────────────────────
+
+/// `bs list` must not invoke `lsof` for any slot: with a `PATH` that only
+/// exposes `git` (no `lsof` binary reachable), `bs list` must still succeed.
+/// Before this change, `bs list` called `list_worktrees_status`, which always
+/// shells out to `lsof` per slot and would fail with a "lsof not found"
+/// error under this same `PATH`.
+#[tokio::test]
+async fn list_does_not_shell_out_to_lsof() {
+    let env = GitEnv::new().await;
+    let _slot = env.run_get();
+
+    let git_only_path = common::git_only_path_dir();
+
+    let out = env
+        .bs()
+        .arg("list")
+        .env("PATH", git_only_path.path())
+        .output()
+        .expect("spawn bs list");
+
+    assert!(
+        out.status.success(),
+        "bs list must succeed without lsof on PATH (it must not shell out to lsof)\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
 }
