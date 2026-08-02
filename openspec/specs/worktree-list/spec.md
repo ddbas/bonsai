@@ -37,7 +37,14 @@ contain:
 2. A colored status badge — `available`, `in use`, or `locked` — reflecting the
    slot's classification, computed using the same priority rules as `bs status`
    (`locked` > `in use` > `available`), printed **before** the worktree path.
-3. The worktree path (with home directory prefix replaced with `~`).
+   The badge SHALL be left-aligned and right-padded (based on its plain,
+   uncolored text) to a fixed column width equal to the length of the longest
+   possible badge string (`available`, 9 characters), so that the worktree path
+   column begins at the same screen column on every line regardless of which
+   badge is shown on that line. Color codes applied to the badge SHALL NOT
+   affect the padding width calculation.
+3. The worktree path (with home directory prefix replaced with `~`), starting at
+   the same fixed column on every line.
 4. Optionally, the checked-out branch name in **bold parentheses** immediately
    after the path (omitted for detached HEAD).
 
@@ -90,6 +97,22 @@ three-way classification.
 - **WHEN** `current_worktree()` returns an error (e.g. git unavailable)
 - **THEN** `bs list` SHALL still display all slots without a current indicator,
   without producing an error
+
+#### Scenario: Path column is aligned across badges of different lengths
+
+- **WHEN** the pool contains at least one slot classified `available` (badge
+  text `"available"`, 9 characters) and at least one slot classified `in use` or
+  `locked` (badge text 6 characters)
+- **THEN** the worktree path SHALL begin at the same character column on every
+  printed line, regardless of that line's badge text length
+
+#### Scenario: Path column is aligned when the current-slot marker is present
+
+- **WHEN** the pool contains slots with different badge lengths and one of them
+  is prefixed with `▶` because it is the current slot
+- **THEN** the worktree path SHALL still begin at the same character column on
+  every printed line, since the `▶`/two-space prefix width is constant across
+  all rows and only the badge padding varies
 
 ### Requirement: `bs list` short-circuits per-slot availability checks
 

@@ -5,7 +5,28 @@
 
 mod common;
 
+use bonsai::worktree::tilde_path;
 use common::GitEnv;
+
+/// Strip ANSI CSI escape sequences (e.g. color codes from `owo-colors`) from
+/// a line so column positions can be computed on the visible text only.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            for nc in chars.by_ref() {
+                if nc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
 
 // ── 4.1: empty pool ───────────────────────────────────────────────────────────
 
@@ -177,6 +198,115 @@ async fn list_locked_slot_shows_locked_badge() {
     assert!(
         !stdout.contains("in use"),
         "a locked slot must not also show 'in use', got: {stdout:?}"
+    );
+}
+
+// ── column alignment across badges of different lengths ─────────────────────
+
+/// The worktree path column must start at the same character position on
+/// every line, regardless of whether that line's badge is `available` (9
+/// chars) or `locked`/`in use` (6 chars each).
+#[tokio::test]
+async fn list_path_column_aligned_across_badge_lengths() {
+    let env = GitEnv::new().await;
+
+    let available_slot = env.run_get();
+    let locked_slot = env.run_get();
+
+    let lock_out = env
+        .bs()
+        .args(["lock", locked_slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs lock");
+    assert!(lock_out.status.success());
+
+    let out = env.bs().arg("list").output().expect("spawn bs list");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let available_path = tilde_path(&available_slot);
+    let locked_path = tilde_path(&locked_slot);
+
+    let mut available_col = None;
+    let mut locked_col = None;
+
+    for line in stdout.lines() {
+        let plain = strip_ansi(line);
+        if let Some(idx) = plain.find(&available_path) {
+            available_col = Some(plain[..idx].chars().count());
+        }
+        if let Some(idx) = plain.find(&locked_path) {
+            locked_col = Some(plain[..idx].chars().count());
+        }
+    }
+
+    let available_col =
+        available_col.expect("expected to find the 'available' slot's path in the output");
+    let locked_col = locked_col.expect("expected to find the 'locked' slot's path in the output");
+
+    assert_eq!(
+        available_col, locked_col,
+        "path column should start at the same character position regardless of badge \
+         length, got: {stdout:?}"
+    );
+}
+
+/// The path column alignment must hold even when the `▶` current-slot prefix
+/// is present on one of the rows, alongside slots with differing badge
+/// lengths.
+#[tokio::test]
+async fn list_path_column_aligned_with_current_slot_prefix() {
+    let env = GitEnv::new().await;
+
+    let available_slot = env.run_get();
+    let locked_slot = env.run_get();
+
+    let lock_out = env
+        .bs()
+        .args(["lock", locked_slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs lock");
+    assert!(lock_out.status.success());
+
+    // Run `bs list` from inside the locked slot so its row gets the `▶` prefix.
+    let out = env
+        .bs_from(&locked_slot)
+        .arg("list")
+        .output()
+        .expect("spawn bs list");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains('▶'),
+        "expected the current-slot marker in output, got: {stdout:?}"
+    );
+
+    let available_path = tilde_path(&available_slot);
+    let locked_path = tilde_path(&locked_slot);
+
+    let mut available_col = None;
+    let mut locked_col = None;
+
+    for line in stdout.lines() {
+        let plain = strip_ansi(line);
+        if let Some(idx) = plain.find(&available_path) {
+            available_col = Some(plain[..idx].chars().count());
+        }
+        if let Some(idx) = plain.find(&locked_path) {
+            locked_col = Some(plain[..idx].chars().count());
+        }
+    }
+
+    let available_col =
+        available_col.expect("expected to find the 'available' slot's path in the output");
+    let locked_col =
+        locked_col.expect("expected to find the 'locked'/current slot's path in the output");
+
+    assert_eq!(
+        available_col, locked_col,
+        "path column should be aligned even when the ▶ current-slot prefix is present, \
+         got: {stdout:?}"
     );
 }
 

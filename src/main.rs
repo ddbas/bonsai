@@ -424,11 +424,23 @@ fn run() -> anyhow::Result<()> {
                     Some(b) => format!("{} ({})", tilde, b.bold()),
                     None => tilde,
                 };
-                let badge = match status {
-                    worktree::WorktreeStatus::Locked => "locked".yellow().to_string(),
-                    worktree::WorktreeStatus::InUse => "in use".red().to_string(),
-                    worktree::WorktreeStatus::Available => "available".green().to_string(),
+                // Fixed badge column width, derived from the longest plain badge
+                // label ("available" = 9 chars). Update this if a new status
+                // variant with a longer label is ever added.
+                const BADGE_WIDTH: usize = 9;
+                let (plain_badge, colorize): (&str, fn(&str) -> String) = match status {
+                    worktree::WorktreeStatus::Locked => {
+                        ("locked", |s: &str| s.to_string().yellow().to_string())
+                    }
+                    worktree::WorktreeStatus::InUse => {
+                        ("in use", |s: &str| s.to_string().red().to_string())
+                    }
+                    worktree::WorktreeStatus::Available => {
+                        ("available", |s: &str| s.to_string().green().to_string())
+                    }
                 };
+                let padded_badge = format!("{:<width$}", plain_badge, width = BADGE_WIDTH);
+                let badge = colorize(&padded_badge);
                 println!("{}{}  {}", prefix, badge, path_display);
             }
         }
