@@ -3,7 +3,9 @@
 Provide a `bs list` subcommand (alias `bs ls`) that enumerates all
 bonsai-managed worktrees for the current repository's pool and displays each
 slot with a colour-coded availability badge, making it easy to inspect pool
-state without parsing raw git output.
+state without parsing raw git output. Detailed per-slot status (itemized lock
+reason, uncommitted/untracked files, and open processes) is available via
+`bs status <path>`.
 
 ## Requirements
 
@@ -22,125 +24,109 @@ to running `bs ls`.
 - **WHEN** the user runs `bs ls`
 - **THEN** the process behaves identically to `bs list`
 
-### Requirement: Each worktree is shown on its own line with path, branch, status, and usage stats
+### Requirement: Each worktree is shown on its own line with path, branch, and status badge
 
 `bs list` SHALL print one line per managed pool worktree. Each line SHALL
 contain:
 
-1. A coloured status badge:
-   - `available` in **green** — clean, unlocked, idle slot.
-   - `in use` in **red** — slot has open processes, uncommitted changes, or
-     other activity, and is not locked.
-   - `locked` in **yellow** — slot is git-locked (regardless of whether it also
-     has open processes or uncommitted changes; `locked` takes priority over
-     `in use`).
-2. The worktree path (with home directory prefix replaced with `~`).
-3. Optionally, the checked-out branch name in **bold parentheses** immediately
+1. When the slot is the one that contains the process's current working
+   directory, the line SHALL be prefixed with `▶`, so that the active slot is
+   visually distinct from the rest. All other lines SHALL be prefixed with two
+   spaces instead. The `▶` prefix alone is sufficient to indicate the current
+   slot; no additional `(current)` label SHALL be printed anywhere on the line.
+2. A colored status badge — `available`, `in use`, or `locked` — reflecting the
+   slot's classification, computed using the same priority rules as `bs status`
+   (`locked` > `in use` > `available`), printed **before** the worktree path.
+3. The worktree path (with home directory prefix replaced with `~`).
+4. Optionally, the checked-out branch name in **bold parentheses** immediately
    after the path (omitted for detached HEAD).
-4. A compact usage-stats column that shows only non-zero values for: open
-   processes (`⚙N`), uncommitted files (`±N`), and untracked files (`?N`),
-   space-separated. The column is blank for clean idle slots. The stats column
-   SHALL appear on `locked` rows when values are non-zero (a locked slot may
-   still have open processes or uncommitted work).
-5. When the slot is the one that contains the process's current working
-   directory, the line SHALL be prefixed with `▶` and annotated with `(current)`
-   immediately after the branch (or path when no branch is present), so that the
-   active slot is visually distinct from the rest. All other lines SHALL retain
-   their existing format without any prefix.
 
-#### Scenario: Single available worktree, detached HEAD
+`bs list` SHALL NOT display a usage-stats column (`⚙N ±N ?N`). Detailed per-slot
+status — itemized lock reason, uncommitted/untracked files, and open processes —
+is available via `bs status <path>` instead; `bs list`'s badge is limited to the
+three-way classification.
 
-- **WHEN** the pool contains one slot that is clean, unlocked, has no open file
-  handles, and is in detached HEAD state
-- **THEN** stdout SHALL contain one line with a green `available` badge, the
-  tilde-prefixed path, no branch suffix, and a blank stats column
+#### Scenario: Single worktree, detached HEAD
 
-#### Scenario: Single available worktree with a branch
+- **WHEN** the pool contains one slot in detached HEAD state
+- **THEN** stdout SHALL contain one line with the status badge, followed by the
+  tilde-prefixed path, no branch suffix, and no stats column
 
-- **WHEN** the pool contains one clean, unlocked, idle slot with branch `main`
-  checked out
-- **THEN** stdout SHALL contain one line with a green `available` badge, the
-  tilde-prefixed path followed by `(main)` in bold, and a blank stats column
+#### Scenario: Single worktree with a branch
 
-#### Scenario: In-use worktree with open file handles
-
-- **WHEN** a slot has 2 open processes and is not locked
-- **THEN** the badge SHALL be red `in use` and the stats column SHALL contain
-  `⚙2`
-
-#### Scenario: In-use worktree with uncommitted changes only
-
-- **WHEN** a slot has 3 modified/staged files, no open processes, no untracked
-  files, and is not locked
-- **THEN** the badge SHALL be red `in use` and the stats column SHALL contain
-  `±3`
-
-#### Scenario: In-use worktree with all three stats
-
-- **WHEN** a slot has 1 open process, 2 uncommitted files, and 3 untracked files
-  and is not locked
-- **THEN** the badge SHALL be red `in use` and the stats column SHALL be
-  `⚙1 ±2 ?3`
-
-#### Scenario: Locked worktree shows yellow badge
-
-- **WHEN** a pool slot is git-locked and is otherwise clean and idle
-- **THEN** the badge SHALL be yellow `locked` and the stats column SHALL be
-  blank
-
-#### Scenario: Locked worktree with open processes shows stats
-
-- **WHEN** a pool slot is git-locked and also has 2 open processes
-- **THEN** the badge SHALL be yellow `locked` and the stats column SHALL contain
-  `⚙2`
-
-#### Scenario: Locked worktree with uncommitted changes shows stats
-
-- **WHEN** a pool slot is git-locked and also has uncommitted changes (e.g.
-  `±1`)
-- **THEN** the badge SHALL be yellow `locked` and the stats column SHALL contain
-  `±1`
-
-#### Scenario: Locked beats in-use — locked and dirty slot shows as locked
-
-- **WHEN** a pool slot is git-locked and also has open processes and uncommitted
-  changes
-- **THEN** the badge SHALL be yellow `locked` (not red `in use`)
-- **THEN** the stats column SHALL show all non-zero values (e.g. `⚙1 ±2`)
+- **WHEN** the pool contains one slot with branch `main` checked out
+- **THEN** stdout SHALL contain one line with the status badge, followed by the
+  tilde-prefixed path and `(main)` in bold, and no stats column
 
 #### Scenario: Mixed pool
 
-- **WHEN** the pool contains multiple slots in different states
-- **THEN** each slot SHALL appear on its own line with the correct badge, path,
-  optional branch, and stats column
+- **WHEN** the pool contains multiple slots in different lock/dirty/open-process
+  states
+- **THEN** each slot SHALL appear on its own line with its path, optional
+  branch, and status badge reflecting its own classification — no stats column
+  SHALL appear for any slot
 
 #### Scenario: Current slot is marked in the list
 
 - **WHEN** the user runs `bs list` from inside a managed pool slot (e.g.
   `~/.bonsai/repo/a3f9c1b2`)
-- **THEN** the row for that slot SHALL be prefixed with `▶` and SHALL include
-  `(current)` after the branch (or path)
+- **THEN** the row for that slot SHALL be prefixed with `▶`
 - **THEN** all other rows SHALL appear without a `▶` prefix
 
 #### Scenario: Current slot subdirectory is still detected
 
 - **WHEN** the user runs `bs list` from a subdirectory inside a managed pool
   slot (e.g. `~/.bonsai/repo/a3f9c1b2/src`)
-- **THEN** the row for the containing slot SHALL be prefixed with `▶` and
-  annotated with `(current)`
+- **THEN** the row for the containing slot SHALL be prefixed with `▶`
 
 #### Scenario: CWD is not inside any managed slot
 
 - **WHEN** the user runs `bs list` from a directory that is not inside any
   managed pool slot
-- **THEN** no row SHALL be prefixed with `▶` and no `(current)` label SHALL
-  appear
+- **THEN** no row SHALL be prefixed with `▶`
 
 #### Scenario: `current_worktree()` fails gracefully
 
 - **WHEN** `current_worktree()` returns an error (e.g. git unavailable)
 - **THEN** `bs list` SHALL still display all slots without a current indicator,
   without producing an error
+
+### Requirement: `bs list` short-circuits per-slot availability checks
+
+For each slot, `bs list` SHALL determine the status badge using early-return
+short-circuiting, evaluating signals in increasing order of cost and stopping as
+soon as the classification is determined:
+
+1. Lock state (free — from the already-parsed `git worktree list --porcelain`
+   output). If locked, `bs list` SHALL classify the slot `locked` **without**
+   invoking `git status` or `lsof` for that slot.
+2. Dirty/untracked file state (`git status --porcelain`, boolean check only — no
+   full parse of individual lines is required). If dirty and unlocked, `bs list`
+   SHALL classify the slot `in use` **without** invoking `lsof` for that slot.
+3. Open-process state (`lsof -w +d <slot>`, boolean check only). Evaluated only
+   when the slot is unlocked and clean, to distinguish `in use` (open processes
+   present) from `available`.
+
+`bs list` SHALL NOT compute or display per-file or per-process detail (counts or
+itemized lists); it SHALL NOT spawn per-slot threads for anything beyond this
+three-signal classification.
+
+#### Scenario: Locked slot skips git status and lsof
+
+- **WHEN** a pool slot is git-locked
+- **THEN** `bs list` SHALL NOT invoke `git status --porcelain` or `lsof` for
+  that slot
+
+#### Scenario: Dirty unlocked slot skips lsof
+
+- **WHEN** a pool slot is unlocked and has uncommitted or untracked files
+- **THEN** `bs list` SHALL NOT invoke `lsof` for that slot
+
+#### Scenario: Clean unlocked slot requires an lsof check
+
+- **WHEN** a pool slot is unlocked and has no uncommitted or untracked files
+- **THEN** `bs list` SHALL invoke `lsof` for that slot to distinguish `in use`
+  from `available`
 
 ### Requirement: Available status means clean, unlocked, and not opened by any process at the slot root
 
@@ -194,26 +180,54 @@ non-zero status and an actionable error message.
   has an open handle directly in its root directory
 - **THEN** `bs list` SHALL display it with a green `available` badge
 
-### Requirement: Per-slot status checks are performed concurrently
+### Requirement: `bs list` meets a documented performance SLO, calibrated per slot-state scenario
 
-`bs list` SHALL evaluate per-slot availability concurrently rather than
-serially. The `lsof +d` and `git status --porcelain` checks for each slot SHALL
-be started in parallel; the display order SHALL match the order returned by
-`git worktree list --porcelain` regardless of completion order.
+`bs list`'s per-slot classification latency SHALL be tracked and enforced by an
+automated benchmark (`benches/bs_ls.rs`, run via `mise run bench` /
+`scripts/check-bs-ls-perf.sh`), measured as p95 latency over repeated in-process
+invocations of the classification path on a warm filesystem cache, with SLOs
+calibrated separately per slot-state scenario since the achievable bound depends
+on how many slots require an `lsof`/`git status` call:
 
-#### Scenario: Multiple slots evaluated without serial blocking
+1. **All slots locked, or all slots dirty/unlocked** (no or partial subprocess
+   fan-out): at a pool size of 50 managed worktree slots, p95 latency SHALL be
+   **<= 100ms**, and the scaling ratio of p95 at 50 slots vs. p95 at 5 slots
+   SHALL be **<= 6.0x**.
+2. **All slots clean, unlocked, and available** (every slot requires both a
+   `git status` and an `lsof` call — the classification cost floor, identical in
+   shape to the pre-change per-slot fan-out this change's early return does not
+   eliminate for this scenario): latency is tracked and reported by the
+   benchmark but is **not** subject to a fixed absolute bound; instead, it is
+   checked against a scaling-regression bound (p95 at 50 slots SHALL NOT exceed
+   the pre-change `list_worktrees_status` baseline ratio by more than a
+   documented margin), to catch a regression beyond the expected cost of one
+   `lsof` + one `git status` call per slot, without demanding sub-linear scaling
+   that isn't achievable when every slot must be checked.
 
-- **WHEN** the pool contains N slots each requiring an `lsof` and `git status`
-  call
-- **THEN** the wall-clock time SHALL be bounded by the slowest single slot, not
-  by the sum of all slots
+This benchmark and its thresholds exist specifically to catch (a) a regression
+back to per-slot subprocess fan-out for scenarios where early return should have
+avoided it (scenario 1), and (b) an unexpected additional cost beyond the
+inherent `lsof`/`git status` floor for the all-available scenario (scenario 2).
 
-#### Scenario: Display order preserved
+#### Scenario: CI fails on an SLO violation in the locked/dirty scenarios
 
-- **WHEN** slots A, B, C are returned by `git worktree list --porcelain` in that
-  order
-- **WHEN** slot C finishes its checks before slot A
-- **THEN** `bs list` SHALL still print slot A first, then B, then C
+- **WHEN** `scripts/check-bs-ls-perf.sh` is run (locally via `mise run bench`,
+  in the `pre-commit` git hook when `src/**/*.rs` or `benches/**/*.rs` change,
+  or in CI on every push/PR) against the all-locked or all-dirty benchmark
+  scenarios
+- **THEN** it SHALL exit non-zero and print which SLO was violated (absolute p95
+  bound, scaling ratio bound, or both) if either threshold above is exceeded
+- **THEN** it SHALL exit zero and print the measured p95 values when both
+  thresholds are met
+
+#### Scenario: All-available scenario is reported but not hard-gated on an absolute bound
+
+- **WHEN** `scripts/check-bs-ls-perf.sh` is run against the all-available
+  benchmark scenario
+- **THEN** it SHALL print the measured p95 values at each pool size
+- **THEN** it SHALL fail only if the measured cost regresses beyond the
+  documented pre-change baseline margin, not merely for being slower than the
+  locked/dirty scenarios' absolute bound
 
 ### Requirement: Empty pool prints a friendly message
 
