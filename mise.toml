@@ -40,7 +40,7 @@ sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs"]
 description = "Run the bs ls performance benchmark and enforce its SLOs (see openspec/changes/add-bs-status-command/specs/worktree-list/spec.md)"
 run = "scripts/check-bs-ls-perf.sh"
 sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "benches/**/*.rs"]
-outputs = ["target/criterion/list_pool_worktrees/**/*"]
+outputs = ["target/criterion/classify_slot_status_all_locked/**/*"]
 
 [tools]
 lefthook = "latest"

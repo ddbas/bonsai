@@ -87,22 +87,24 @@ enum Commands {
     ///
     /// Displays one line per slot: the tilde-abbreviated path, optionally
     /// followed by the checked-out branch name in parentheses, with the
-    /// current slot marked with a `▶` prefix and `(current)` label. Only
-    /// parses `git worktree list --porcelain`; no per-slot `lsof` or
-    /// `git status` checks are performed, so this stays fast regardless of
-    /// pool size. Use `bs status [PATH]` for detailed lock/dirty/open-process
-    /// information about a single slot.
+    /// current slot marked with a `▶` prefix and `(current)` label, and a
+    /// coloured status badge (`available`/`in use`/`locked`). Per-slot
+    /// checks short-circuit as soon as the badge's classification is known:
+    /// a locked slot never triggers `git status`/`lsof`; a dirty unlocked
+    /// slot never triggers `lsof`. No per-file or per-process detail (counts
+    /// or itemized lists) is computed or displayed here — use
+    /// `bs status [PATH]` for that.
     #[command(alias = "ls")]
     List,
 
     /// Show detailed status for a single managed worktree slot.
     ///
     /// Reports the slot's overall classification (`available` / `in use` /
-    /// `locked`, using the same priority rules `bs list` used to apply
-    /// before this command existed), plus itemized detail: the lock reason
-    /// (if locked), the individual `git status --porcelain` lines
-    /// (uncommitted and untracked), and the PID + command name of each
-    /// process with an open file handle directly at the slot root.
+    /// `locked`, using the same priority rules `bs list`'s status badge
+    /// applies), plus itemized detail: the lock reason (if locked), the
+    /// individual `git status --porcelain` lines (uncommitted and untracked),
+    /// and the PID + command name of each process with an open file handle
+    /// directly at the slot root.
     ///
     /// `PATH` is optional; when omitted, `bs status` resolves the slot
     /// containing the current working directory (same resolution as
@@ -401,7 +403,7 @@ fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let entries = worktree::list_pool_worktrees(&pool_dir)?;
+            let entries = worktree::list_worktrees_status(&pool_dir)?;
 
             if entries.is_empty() {
                 println!("No worktrees managed for this repository.");
@@ -413,11 +415,11 @@ fn run() -> anyhow::Result<()> {
             let current_path: Option<std::path::PathBuf> =
                 worktree::current_worktree().ok().flatten().map(|(p, _)| p);
 
-            for entry in &entries {
-                let tilde = worktree::tilde_path(&entry.path);
-                let is_current = current_path.as_deref() == Some(entry.path.as_path());
+            for (path, status, branch) in &entries {
+                let tilde = worktree::tilde_path(path);
+                let is_current = current_path.as_deref() == Some(path.as_path());
                 let prefix = if is_current { "▶ " } else { "  " };
-                let path_display = match &entry.branch {
+                let path_display = match branch {
                     Some(b) if is_current => {
                         format!("{} ({}) (current)", tilde, b.bold())
                     }
@@ -425,7 +427,12 @@ fn run() -> anyhow::Result<()> {
                     None if is_current => format!("{} (current)", tilde),
                     None => tilde,
                 };
-                println!("{}{}", prefix, path_display);
+                let badge = match status {
+                    worktree::WorktreeStatus::Locked => "locked".yellow().to_string(),
+                    worktree::WorktreeStatus::InUse => "in use".red().to_string(),
+                    worktree::WorktreeStatus::Available => "available".green().to_string(),
+                };
+                println!("{}{}  {}", prefix, path_display, badge);
             }
         }
 

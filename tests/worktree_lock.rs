@@ -79,8 +79,7 @@ async fn unlock_restores_available_status() {
         "bs unlock should print 'unlocked', got: {stdout:?}"
     );
 
-    // The slot should now appear as `available` in `bs status`
-    // (`bs list` no longer prints a status badge).
+    // The slot should now appear as `available` in `bs status`.
     let status_out = env
         .bs()
         .args(["status", slot_str])
@@ -188,7 +187,7 @@ async fn lock_unlock_defaults_to_current_slot() {
 
 /// A locked slot is reported as `locked` (not `in use`) by `bs status`.
 /// A locked slot that also has uncommitted changes is still reported as
-/// `locked`. `bs list` never shows a badge for either case.
+/// `locked`. `bs list`'s badge agrees, showing `locked` for both cases.
 #[tokio::test]
 async fn status_shows_locked_for_locked_slot() {
     let env = GitEnv::new().await;
@@ -202,13 +201,17 @@ async fn status_shows_locked_for_locked_slot() {
         .expect("spawn bs lock");
     assert!(lock_out.status.success());
 
-    // `bs list` should show no badge at all.
+    // `bs list` should show the `locked` badge, not `in use`.
     let list_out = env.bs().arg("list").output().expect("spawn bs list");
     assert!(list_out.status.success());
     let list_stdout = String::from_utf8_lossy(&list_out.stdout);
     assert!(
-        !list_stdout.contains("locked") && !list_stdout.contains("in use"),
-        "bs list must never show a status badge, got: {list_stdout:?}"
+        list_stdout.contains("locked"),
+        "bs list should show the 'locked' badge, got: {list_stdout:?}"
+    );
+    assert!(
+        !list_stdout.contains("in use"),
+        "bs list must not show 'in use' for a locked slot, got: {list_stdout:?}"
     );
 
     // `bs status` should show `locked`, not `in use`.

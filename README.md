@@ -21,9 +21,9 @@ $ bs get
 
 ```
 $ bs list
-▶ ~/.bonsai/myrepo/a1b2c3d4 (current)
-  ~/.bonsai/myrepo/b5c6d7e8 (main)
-  ~/.bonsai/myrepo/c9d0e1f2 (my-feature)
+▶ ~/.bonsai/myrepo/a1b2c3d4 (current)  available
+  ~/.bonsai/myrepo/b5c6d7e8 (main)  in use
+  ~/.bonsai/myrepo/c9d0e1f2 (my-feature)  locked
 ```
 
 ```

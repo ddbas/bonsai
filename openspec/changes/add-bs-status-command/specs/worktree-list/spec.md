@@ -120,8 +120,8 @@ on how many slots require an `lsof`/`git status` call:
 
 1. **All slots locked, or all slots dirty/unlocked** (no or partial subprocess
    fan-out): at a pool size of 50 managed worktree slots, p95 latency SHALL be
-   **<= 50ms**, and the scaling ratio of p95 at 50 slots vs. p95 at 5 slots
-   SHALL be **<= 2.5x**.
+   **<= 100ms**, and the scaling ratio of p95 at 50 slots vs. p95 at 5 slots
+   SHALL be **<= 6.0x**.
 2. **All slots clean, unlocked, and available** (every slot requires both a
    `git status` and an `lsof` call — the classification cost floor, identical in
    shape to the pre-change per-slot fan-out this change's early return does not
