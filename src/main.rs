@@ -85,10 +85,11 @@ enum Commands {
 
     /// List all managed worktrees in the pool.
     ///
-    /// Displays one line per slot: the tilde-abbreviated path, optionally
-    /// followed by the checked-out branch name in parentheses, with the
-    /// current slot marked with a `▶` prefix and `(current)` label, and a
-    /// coloured status badge (`available`/`in use`/`locked`). Per-slot
+    /// Displays one line per slot: a coloured status badge
+    /// (`available`/`in use`/`locked`), followed by the tilde-abbreviated
+    /// path, optionally followed by the checked-out branch name in
+    /// parentheses. The current slot is marked with a `▶` prefix (no other
+    /// worktrees are so marked). Per-slot
     /// checks short-circuit as soon as the badge's classification is known:
     /// a locked slot never triggers `git status`/`lsof`; a dirty unlocked
     /// slot never triggers `lsof`. No per-file or per-process detail (counts
@@ -420,11 +421,7 @@ fn run() -> anyhow::Result<()> {
                 let is_current = current_path.as_deref() == Some(path.as_path());
                 let prefix = if is_current { "▶ " } else { "  " };
                 let path_display = match branch {
-                    Some(b) if is_current => {
-                        format!("{} ({}) (current)", tilde, b.bold())
-                    }
                     Some(b) => format!("{} ({})", tilde, b.bold()),
-                    None if is_current => format!("{} (current)", tilde),
                     None => tilde,
                 };
                 let badge = match status {
@@ -432,7 +429,7 @@ fn run() -> anyhow::Result<()> {
                     worktree::WorktreeStatus::InUse => "in use".red().to_string(),
                     worktree::WorktreeStatus::Available => "available".green().to_string(),
                 };
-                println!("{}{}  {}", prefix, path_display, badge);
+                println!("{}{}  {}", prefix, badge, path_display);
             }
         }
 

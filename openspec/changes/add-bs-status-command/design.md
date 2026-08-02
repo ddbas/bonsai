@@ -60,13 +60,14 @@ the count-only helper can be deleted as dead code.
 `Commands::List` keeps calling a per-slot classification path (renamed from the
 old `list_worktrees_status` in spirit, but with per-slot logic changed — see
 below), still via one thread per pool slot so cross-slot latency stays bounded
-by the slowest slot. Each row keeps: the `▶`/`(current)` current-slot marker,
-the tilde-abbreviated path, the optional bold branch suffix, **and** the status
-badge (`available`/`in use`/`locked`, same colors as before). Only the stats
-column (`⚙N ±N ?N`) is removed — that data still exists in more detail via
-`bs status`, so keeping a compact, count-only duplicate in `bs list` adds little
-value while its removal is what actually saves work (no need to count every
-dirty file or every open process, just detect the first one of each).
+by the slowest slot. Each row keeps: the `▶` current-slot marker, the status
+badge (`available`/`in use`/`locked`, same colors as before, now printed before
+the path), the tilde-abbreviated path, **and** the optional bold branch suffix.
+Only the stats column (`⚙N ±N ?N`) is removed — that data still exists in more
+detail via `bs status`, so keeping a compact, count-only duplicate in `bs list`
+adds little value while its removal is what actually saves work (no need to
+count every dirty file or every open process, just detect the first one of
+each).
 
 Each slot's classification now short-circuits, using a new
 `classify_slot_status(entry: &WorktreeEntry) -> Result<WorktreeStatus>`:
