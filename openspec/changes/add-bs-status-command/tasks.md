@@ -74,12 +74,31 @@
       untracked file lists.
 - [ ] 4.3 Run the full test suite and fix any regressions.
 
-## 5. Docs & polish
+## 5. Performance benchmarking
 
-- [ ] 5.1 Update `bs help` / `--help` long-form docs (clap doc comments) to
+- [x] 5.1 Add a Criterion dev-dependency and `benches/bs_ls.rs` benchmarking
+      `worktree::list_pool_worktrees` (the `bs list` pool-scan path) across pool
+      sizes (1/5/10/25/50 slots) using real, throwaway git worktrees, plus a
+      comparison-only baseline benchmark of the pre-change
+      `worktree::list_worktrees_status` path at the same sizes.
+- [x] 5.2 Add `scripts/check-bs-ls-perf.sh`, computing p95 per-iteration latency
+      from Criterion's raw sample data and asserting the SLOs in
+      `specs/worktree-list/spec.md` (p95 @ 50 slots <= 50ms; ratio p95@50/p95@5
+      <= 2.5x), exiting non-zero on violation.
+- [x] 5.3 Add a `mise run bench` task (with `sources`/`outputs` so it's skipped
+      when unrelated files change, matching the `build`/`test` task pattern),
+      wire it into the `pre-commit` lefthook hook (same file globs as `test`),
+      and add a dedicated `bench` job to `.github/workflows/ci.yml`.
+- [ ] 5.4 Once `bs list` switches to `list_pool_worktrees` (tasks 2.x), re-run
+      the benchmark to confirm the measured p95 values still meet both SLOs
+      end-to-end (not just at the library-function level).
+
+## 6. Docs & polish
+
+- [ ] 6.1 Update `bs help` / `--help` long-form docs (clap doc comments) to
       describe `bs status` and the revised `bs list` behavior.
-- [ ] 5.2 Update `README.md` (and any other user-facing docs mentioning
+- [ ] 6.2 Update `README.md` (and any other user-facing docs mentioning
       `bs     list`'s status badge or stats column) to describe the new split
       between `bs list` and `bs status`.
-- [ ] 5.3 Run `cargo fmt`, `cargo clippy`, and the full test suite; fix any
+- [ ] 6.3 Run `cargo fmt`, `cargo clippy`, and the full test suite; fix any
       warnings introduced by the change.

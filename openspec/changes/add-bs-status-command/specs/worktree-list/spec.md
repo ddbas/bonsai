@@ -85,6 +85,43 @@ processes or dirty files in any slot.
 - **WHEN** the user runs `bs list` against a pool with N slots
 - **THEN** `bs list` SHALL NOT invoke `git status --porcelain` for any slot
 
+## ADDED Requirements
+
+### Requirement: `bs list` meets a documented performance SLO
+
+`bs list`'s pool-scan latency SHALL be tracked and enforced by an automated
+benchmark (`benches/bs_ls.rs`, run via `mise run bench` /
+`scripts/check-bs-ls-perf.sh`) against the following SLOs, measured as p95
+latency over repeated in-process invocations of the pool-scan path
+(`worktree::list_pool_worktrees` plus rendering, excluding process startup) on a
+warm filesystem cache:
+
+1. At a pool size of 50 managed worktree slots, p95 latency SHALL be **<=
+   50ms**.
+2. The scaling ratio of p95 latency at 50 slots vs. p95 latency at 5 slots SHALL
+   be **<= 2.5x** — i.e. a 10x increase in pool size SHALL NOT produce more than
+   a 2.5x increase in latency, confirming the scan's cost is dominated by a
+   fixed per-invocation overhead rather than growing proportionally with pool
+   size (a single `git worktree list --porcelain` call's own cost grows slightly
+   with worktree count, so a strict O(1)/flat bound is not realistic; 2.5x was
+   chosen empirically as comfortably above observed baseline noise for the fixed
+   path, ~1.7x-2.0x, while remaining far below the ~7-8x ratio measured for the
+   pre-change per-slot `lsof`/ `git status` fan-out this change removes).
+
+This benchmark and its thresholds exist specifically to catch a regression back
+to per-slot subprocess fan-out (the exact problem this change fixes) being
+silently reintroduced in `bs list`.
+
+#### Scenario: CI fails on an SLO violation
+
+- **WHEN** `scripts/check-bs-ls-perf.sh` is run (locally via `mise run bench`,
+  in the `pre-commit` git hook when `src/**/*.rs` or `benches/**/*.rs` change,
+  or in CI on every push/PR)
+- **THEN** it SHALL exit non-zero and print which SLO was violated (absolute p95
+  bound, scaling ratio bound, or both) if either threshold above is exceeded
+- **THEN** it SHALL exit zero and print the measured p95 values when both
+  thresholds are met
+
 ## REMOVED Requirements
 
 ### Requirement: Available status means clean, unlocked, and not opened by any process at the slot root

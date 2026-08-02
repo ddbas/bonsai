@@ -47,7 +47,10 @@ slot they actually care about.
 
 - `worktree-list`: `bs list` / `bs ls` no longer prints a status badge or
   usage-stats column and no longer performs per-slot `lsof`/`git status` checks;
-  each row is reduced to the current-slot marker, path, and optional branch.
+  each row is reduced to the current-slot marker, path, and optional branch. A
+  performance SLO is now a documented requirement (p95 latency <= 50ms at 50
+  pool slots; scaling ratio 50-slot/5-slot p95 <= 2.5x), enforced by an
+  automated benchmark.
 - `worktree-usage-stats`: the usage-stats rendering (open-process count,
   uncommitted count, untracked count, and now the underlying detail behind each
   count) moves from `bs list`'s compact column to `bs status`'s detailed report.
@@ -64,5 +67,9 @@ slot they actually care about.
   for/consumed by the new `bs status` code path only.
 - Tests: `tests/worktree_list.rs` scenarios asserting badges/stats columns need
   updating; new `tests/worktree_status.rs` (or similar) for the new subcommand.
+- Performance: `benches/bs_ls.rs` (Criterion) benchmarks `bs list`'s pool-scan
+  cost across pool sizes; `scripts/check-bs-ls-perf.sh` enforces the SLOs
+  documented in `specs/worktree-list/spec.md`, run via `mise run bench`, the
+  `pre-commit` lefthook hook, and a dedicated CI job.
 - Docs/help text: update `bs list`/`bs ls` and add `bs status` descriptions in
   the CLI's `--help` output.

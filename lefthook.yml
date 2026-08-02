@@ -29,6 +29,13 @@ pre-commit:
         - "Cargo.lock"
         - "src/**/*.rs"
         - "tests/**/*.rs"
+    - name: bench
+      run: mise run bench
+      glob:
+        - "Cargo.toml"
+        - "Cargo.lock"
+        - "src/**/*.rs"
+        - "benches/**/*.rs"
     - name: openspec-validate
       run: bash scripts/openspec-validate-staged.sh {staged_files}
       glob: "openspec/**"

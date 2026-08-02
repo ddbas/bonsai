@@ -36,6 +36,12 @@ description = "Run the cargo test suite"
 run = "rtk cargo test"
 sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs"]
 
+[tasks.bench]
+description = "Run the bs ls performance benchmark and enforce its SLOs (see openspec/changes/add-bs-status-command/specs/worktree-list/spec.md)"
+run = "scripts/check-bs-ls-perf.sh"
+sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "benches/**/*.rs"]
+outputs = ["target/criterion/list_pool_worktrees/**/*"]
+
 [tools]
 lefthook = "latest"
 "github:rtk-ai/rtk" = "latest"

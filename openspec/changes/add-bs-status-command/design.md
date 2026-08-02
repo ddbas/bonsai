@@ -159,6 +159,37 @@ help text and specs, ship in the next version. Users pin to an older `bs`
 version if they depend on the old `bs list` columns until they migrate scripts
 to `bs status`.
 
+## Performance Benchmarking
+
+To guard the performance goal this change makes (`bs list` becoming cheap and
+not scaling with pool size) against future regression, a Criterion benchmark
+(`benches/bs_ls.rs`) measures `worktree::list_pool_worktrees` across pool sizes
+(1/5/10/25/50 slots) using real, throwaway git worktrees, and also benchmarks
+the pre-change `worktree::list_worktrees_status` path at the same sizes purely
+as a before/after comparison baseline (not itself SLO-checked).
+
+`scripts/check-bs-ls-perf.sh` runs the benchmark and computes p95 per-iteration
+latency from Criterion's raw sample data (Criterion's `estimates.json` only
+reports mean/median/slope, not percentiles), then asserts the two SLOs codified
+as a requirement in `specs/worktree-list/spec.md`:
+
+1. p95 @ 50 slots <= 50ms.
+2. p95 @ 50 slots / p95 @ 5 slots <= 2.5x.
+
+Measured locally: the new `list_pool_worktrees` path scores ~6-7ms p95 @ 5 slots
+and ~12-13ms p95 @ 50 slots (ratio ~1.7-2.0x), comfortably inside both bounds.
+The old `list_worktrees_status` path (kept only as a benchmark comparison, not
+part of `bs list` after this change) scores ~79ms @ 5 slots and ~600ms @ 50
+slots (ratio ~7.6x), which is the magnitude of regression this benchmark is
+designed to catch if per-slot subprocess fan-out is ever reintroduced into
+`bs list`.
+
+The check runs via `mise run bench` (cached via mise's `sources`/`outputs`, so
+it's skipped when `Cargo.toml`/`Cargo.lock`/`src/**/*.rs`/`benches/**/*.rs` are
+unchanged), is wired into the `pre-commit` lefthook hook (same file globs as the
+existing `test` job) and into CI as a dedicated `bench` job in
+`.github/workflows/ci.yml`.
+
 ## Open Questions
 
 - Exact final text layout for `bs status` (e.g. whether to always print "none"
