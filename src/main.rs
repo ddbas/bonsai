@@ -2,24 +2,20 @@ use clap::{CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 
 use bonsai::logging;
+use bonsai::tmux;
 use bonsai::worktree;
 
 #[derive(Parser)]
 #[command(
     name = "bs",
-    about = "🌳 bonsai – instantly provision clean git worktrees so you can context-switch without trashing your working tree.",
+    about = "🌳 bonsai – provision clean git worktrees for fast context-switching.",
     long_about = None,
     // Disable built-in `help` subcommand so we can define our own.
     disable_help_subcommand = true,
 )]
 struct Cli {
-    /// Log level for file output: trace, debug, info (default), warn, or error.
-    ///
-    /// Controls which log events are written to the log file. The default level
-    /// is `info`, which captures important events without excessive verbosity.
-    /// Higher levels (warn, error) are more concise; lower levels (debug, trace)
-    /// include more diagnostic detail. Logs are written only to a file in the
-    /// platform log directory; stdout and stderr are never affected.
+    /// Log level for the log file: trace, debug, info, warn, or error
+    /// (default: info). Does not affect stdout/stderr output.
     #[arg(long, global = true, default_value = "info", value_name = "LEVEL")]
     log_level: logging::LogLevel,
 
@@ -29,42 +25,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Provision or reuse a managed git worktree from the pool.
+    /// Provision or reuse a managed git worktree from the pool, printing its
+    /// path.
     ///
-    /// Resolves the current HEAD, finds a clean unlocked slot under
-    /// ~/.bonsai/<repo>/ (or creates one), resets it to that HEAD, and
-    /// prints the absolute path to stdout.
-    ///
-    /// Use `-b <branch>` to create a new branch at HEAD inside the slot
-    /// (fails if the branch already exists, mirroring `git checkout -b`).
-    /// Use `-B <branch>` to create or reset a branch (mirroring
-    /// `git checkout -B`). Without either flag the slot is left in detached
+    /// Resets the slot to the current HEAD. Use `-b <branch>` to create a new
+    /// branch, `-B <branch>` to create-or-reset a branch, or pass a
+    /// positional `<branch>` to check out an existing branch; these three
+    /// are mutually exclusive, and with none the slot is left in detached
     /// HEAD state.
     ///
-    /// Pass a positional `<branch>` argument to check out an *existing*
-    /// branch inside the provisioned slot (mirroring plain
-    /// `git checkout <branch>` / `git worktree add <path> <branch>`); the
-    /// branch is not created or reset, and must already exist in the
-    /// repository. If `<branch>` is already checked out in one of this
-    /// repo's other bonsai-managed pool slots, that existing slot's path is
-    /// returned as-is (no new slot is provisioned, and no slot is reset or
-    /// checked out again) rather than erroring; it only fails if the branch
-    /// does not exist at all, or is checked out in a worktree outside the
-    /// bonsai pool. The positional `<branch>` argument, `-b`, and `-B` are
-    /// pairwise mutually exclusive.
-    ///
-    /// This is also the default command: running `bs` with no subcommand
-    /// is equivalent to `bs get` (always detached HEAD; the positional
-    /// `<branch>` argument and `-b`/`-B` require the explicit `get`
-    /// subcommand).
+    /// This is the implicit default command: running `bs` alone is
+    /// equivalent to `bs get` in detached HEAD state.
     Get {
-        /// Check out an existing branch inside the provisioned slot.
-        /// Fails if the branch does not exist, or is checked out in a
-        /// worktree outside the bonsai pool. If the branch is already
-        /// checked out in one of this repo's other bonsai-managed pool
-        /// slots, that slot's path is returned as-is instead of erroring
-        /// (mirrors plain `git checkout <branch>`, except for the
-        /// already-managed-slot case). Mutually exclusive with `-b`/`-B`.
+        /// Check out an existing branch inside the provisioned slot. Fails
+        /// if the branch does not exist. Mutually exclusive with `-b`/`-B`.
         #[arg(
             value_name = "BRANCH",
             conflicts_with = "new_branch",
@@ -72,15 +46,33 @@ enum Commands {
         )]
         branch: Option<String>,
 
-        /// Create a new branch at HEAD in the provisioned slot.
-        /// Fails if the branch already exists (mirrors `git checkout -b`).
+        /// Create a new branch at HEAD in the provisioned slot. Fails if the
+        /// branch already exists. Mutually exclusive with `-B`.
         #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "reset_branch")]
         new_branch: Option<String>,
 
-        /// Create or reset a branch at HEAD in the provisioned slot.
-        /// Overwrites an existing branch without error (mirrors `git checkout -B`).
+        /// Create or reset a branch at HEAD in the provisioned slot,
+        /// overwriting an existing branch without error. Mutually exclusive
+        /// with `-b`.
         #[arg(short = 'B', value_name = "BRANCH", conflicts_with = "new_branch")]
         reset_branch: Option<String>,
+
+        /// Create (or reuse) a tmux session rooted at the provisioned slot.
+        /// With no value, a session name is generated automatically; pass
+        /// `--tmux-session=NAME` to use a specific name. Requires `tmux` on
+        /// `PATH`.
+        #[arg(
+            long = "tmux-session",
+            value_name = "NAME",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        tmux_session: Option<String>,
+
+        /// Create the tmux session in the background without attaching the
+        /// invoking terminal to it. Requires `--tmux-session`.
+        #[arg(long = "no-attach", requires = "tmux_session")]
+        no_attach: bool,
     },
 
     /// List all managed worktrees in the pool.
@@ -120,12 +112,7 @@ enum Commands {
 
     /// Show the managed worktree slot that contains the current directory.
     ///
-    /// Prints the tilde-abbreviated path of the bonsai pool slot that the
-    /// current working directory lives inside, together with the checked-out
-    /// branch name when applicable.
-    ///
-    /// Exits with status 0 when inside a managed slot; exits with status 1
-    /// when the CWD is not part of any managed slot for this repository.
+    /// Exits with status 0 when inside a managed slot, 1 otherwise.
     Current,
 
     /// Show usage information.
@@ -133,38 +120,29 @@ enum Commands {
 
     /// Lock a bonsai pool slot, preventing `bs get` from reusing it.
     ///
-    /// Locks the target slot via `git worktree lock`. Defaults to the current
-    /// slot when no path argument is supplied. An optional `--reason` string
-    /// is forwarded verbatim to git.
+    /// Defaults to the current slot when no path argument is supplied.
     Lock {
-        /// Human-readable reason stored with the lock (forwarded to git).
+        /// Reason stored with the lock, forwarded to git verbatim.
         #[arg(long, value_name = "MESSAGE")]
         reason: Option<String>,
 
-        /// Absolute path to the pool slot to lock.
-        /// Defaults to the current slot when omitted.
+        /// Path to the pool slot to lock. Defaults to the current slot.
         path: Option<std::path::PathBuf>,
     },
 
     /// Unlock a bonsai pool slot, making it available for reuse by `bs get`.
     ///
-    /// Unlocks the target slot via `git worktree unlock`. Defaults to the
-    /// current slot when no path argument is supplied.
+    /// Defaults to the current slot when no path argument is supplied.
     Unlock {
-        /// Absolute path to the pool slot to unlock.
-        /// Defaults to the current slot when omitted.
+        /// Path to the pool slot to unlock. Defaults to the current slot.
         path: Option<std::path::PathBuf>,
     },
 
     /// Print bonsai's runtime paths and metadata.
     ///
-    /// Displays bonsai's own resolved paths (log directory, current log file,
-    /// managed root) and metadata (version, effective log level) to stdout in
-    /// a simple `key: value` format, one field per line.
-    ///
-    /// This command performs no filesystem writes and works correctly whether
-    /// or not any bonsai worktrees have been created yet, making it useful as
-    /// a first debugging step if logging or other components fail to initialize.
+    /// Prints resolved paths (log directory, current log file, managed root)
+    /// and metadata (version, effective log level) as `key: value` lines.
+    /// Performs no filesystem writes.
     Info,
 }
 
@@ -373,7 +351,15 @@ fn run() -> anyhow::Result<()> {
             branch,
             new_branch,
             reset_branch,
+            tmux_session,
+            no_attach,
         }) => {
+            // Check up front (before provisioning) so a missing `tmux` fails
+            // fast without leaving a half-completed operation behind.
+            if tmux_session.is_some() {
+                tmux::check_tmux_available()?;
+            }
+
             let branch = match (branch, new_branch, reset_branch) {
                 (Some(b), None, None) => Some(worktree::BranchMode::Existing(b)),
                 (None, Some(b), None) => Some(worktree::BranchMode::New(b)),
@@ -390,6 +376,17 @@ fn run() -> anyhow::Result<()> {
             match branch_name.as_deref() {
                 Some(b) => println!("🌳 {}  ({})", path.display(), b),
                 None => println!("🌳 {}", path.display()),
+            }
+
+            if let Some(value) = tmux_session {
+                let repo_name = worktree::repo_slug()?;
+                let branch_display = branch_name.as_deref().unwrap_or(tmux::DETACHED_LABEL);
+                let session_name = tmux::resolve_session_name(&value, &repo_name, branch_display);
+                tmux::ensure_session(&session_name, &path)?;
+                println!("\u{1f5a5}\u{fe0f}  tmux session: {}", session_name);
+                if !no_attach {
+                    tmux::attach_session(&session_name)?;
+                }
             }
         }
 
