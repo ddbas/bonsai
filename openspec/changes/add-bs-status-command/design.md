@@ -2,34 +2,46 @@
 
 `bs list` currently calls `worktree::list_worktrees_status`, which for every
 pool slot spawns a thread that runs `lsof -w +d <slot>` and
-`git status --porcelain -C <slot>` concurrently, then classifies the slot as
-`Available` / `InUse` / `Locked`. This is bounded by the _slowest single slot_
+`git status --porcelain -C <slot>` concurrently (regardless of what the lock
+state already tells us), then classifies the slot as `Available` / `InUse` /
+`Locked`, and additionally computes exact dirty/untracked/ open-process counts
+for the now-removed stats column. This is bounded by the _slowest single slot_
 (good), but the per-slot cost is still real — `lsof` scans the whole open-file
 table and `git status` walks the working tree — and on a pool with dozens of
 worktrees the aggregate wall-clock and system load add up even with concurrency.
-`bs list`'s job (enumerate what exists) does not need this data; only a "should
-I touch/reuse this slot right now?" question does.
+Much of that cost is avoidable: a locked slot's classification is already known
+before either subprocess runs, and a dirty slot's classification is already
+known before `lsof` runs — the old implementation ran both checks
+unconditionally for every slot regardless.
 
 `bs get`'s `find_available_slot` also depends on the same lock/dirty/open-file
-checks to decide whether a slot can be reused — that usage is unaffected by this
-change; it does not go through `bs list`'s code path and keeps running its own
-per-slot checks (it only ever needs to check slots until it finds one free, not
-enumerate every slot).
+checks to decide whether a slot can be reused. Its control flow (skip locked,
+skip dirty, then check for open processes, all with early return per slot) is
+unaffected by this change and remains the model `bs list`'s new
+`classify_slot_status` follows; it does not go through `bs list`'s code path and
+keeps checking slots one at a time until it finds one free, not enumerating
+every slot. As part of this change it switches from
+`count_open_processes(&path)? > 0` to the equivalent `has_open_files(&path)?` so
+the count-only helper can be deleted as dead code.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make `bs list` / `bs ls` O(cheap): only `git worktree list --porcelain`
-  parsing, no `lsof`, no `git status`, regardless of pool size.
-- Introduce `bs status [PATH]` as the single place to get lock / dirty /
-  open-process detail for one slot, resolved either from an explicit path or
-  from the current working directory.
+- Make `bs list` / `bs ls` avoid unnecessary work: no usage-stats column, and no
+  `lsof`/`git status` invocation beyond what's needed to compute the status
+  badge, short-circuiting per slot as soon as the classification is known (e.g.
+  a locked or dirty slot never triggers an `lsof` call).
+- Introduce `bs status [PATH]` as the single place to get full lock / dirty /
+  open-process _detail_ for one slot (not just the badge), resolved either from
+  an explicit path or from the current working directory.
 - Preserve the exact classification semantics (`locked` beats `in use` beats
-  `available`) that `bs list` used to apply, just relocated to `bs status`.
+  `available`) that `bs list` always applied, factored into one function shared
+  by both `bs list` and `bs status` so they cannot disagree.
 - Give more actionable detail than the old compact stats column: which files are
   dirty/untracked (from `git status --porcelain` lines) and which processes
-  (PID + command) hold the slot open, not just counts.
+  (PID + command) hold the slot open, not just counts — available via
+  `bs status`, while `bs list` keeps only the compact badge.
 
 **Non-Goals:**
 
@@ -43,24 +55,54 @@ enumerate every slot).
 
 ## Decisions
 
-### `bs list` stops calling `list_worktrees_status`
+### `bs list` keeps the status badge, drops the stats column, gains early return
 
-`Commands::List` switches from `worktree::list_worktrees_status(&pool_dir)` to
-`worktree::list_pool_worktrees(&pool_dir)`, which only parses
-`git worktree list --porcelain` (already fast, single git invocation, no
-subprocess fan-out). Each row keeps: the `▶`/`(current)` current-slot marker,
-the tilde-abbreviated path, and the optional bold branch suffix. The status
-badge and stats column are removed entirely — including the free "locked" flag
-already present in the porcelain output — for output consistency: a row's
-presence/absence of a badge should not itself imply partial status information
-is available; `bs status` is the single source of truth for slot state.
+`Commands::List` keeps calling a per-slot classification path (renamed from the
+old `list_worktrees_status` in spirit, but with per-slot logic changed — see
+below), still via one thread per pool slot so cross-slot latency stays bounded
+by the slowest slot. Each row keeps: the `▶`/`(current)` current-slot marker,
+the tilde-abbreviated path, the optional bold branch suffix, **and** the status
+badge (`available`/`in use`/`locked`, same colors as before). Only the stats
+column (`⚙N ±N ?N`) is removed — that data still exists in more detail via
+`bs status`, so keeping a compact, count-only duplicate in `bs list` adds little
+value while its removal is what actually saves work (no need to count every
+dirty file or every open process, just detect the first one of each).
 
-Alternative considered: keep showing the (free) `locked` badge in `bs list`
-since it costs nothing beyond porcelain parsing, and only drop the
-`lsof`/`git status`-derived parts. Rejected because it fragments "status" into
-"the free part of status lives in `list`, the rest lives in `status`", which is
-confusing; the proposal's ask is a clean split — `list` enumerates, `status`
-inspects.
+Each slot's classification now short-circuits, using a new
+`classify_slot_status(entry: &WorktreeEntry) -> Result<WorktreeStatus>`:
+
+1. `entry.locked` (already known for free from the
+   `git worktree list --porcelain` parse) → `Locked` immediately, no
+   `git status`/`lsof` call at all.
+2. Else, `is_clean(&entry.path)?` — a boolean-returning sibling of
+   `git_status_lines` sharing the same underlying `git status --porcelain`
+   invocation (`run_git_status_porcelain`) but stopping at "is stdout empty"
+   instead of parsing every line. If dirty → `InUse` immediately, **no `lsof`
+   call**.
+3. Else, `has_open_files(&entry.path)?` — a boolean-returning sibling of
+   `list_open_processes` sharing the same underlying `lsof -w +d` invocation
+   (`run_lsof_raw`) but stopping at "is stdout empty" instead of parsing every
+   process. Determines the final `InUse`/`Available` split.
+
+All three outcomes route through one shared function,
+`classify(locked: bool, dirty: bool, has_processes: bool) -> WorktreeStatus`,
+which is the single place the `Locked` > `InUse` > `Available` priority rule is
+encoded. `classify_slot_status` calls it with whichever booleans it actually
+needed to compute (short-circuiting before computing the rest); `slot_status`
+(below, for `bs status`) calls the same function with booleans derived from the
+full detail it collects regardless of classification. This guarantees
+`bs list`'s badge and `bs status`'s classification can never drift apart, since
+they're backed by identical priority logic — only the amount of detail gathered
+en route differs.
+
+Alternative considered: keep `bs list` calling only `list_pool_worktrees`
+(porcelain-only, no badge at all), fully separating enumeration from status.
+Rejected per user correction: the badge is valuable at-a-glance information
+users rely on, and the early-return strategy above recovers most of the
+performance win for the common cases (locked pools, dirty pools) without giving
+up the badge; only the fully-clean-pool case still pays the original per-slot
+`lsof` cost, which is inherent to answering "is this slot open by a process" and
+not reducible by restructuring `bs list` alone.
 
 ### `bs status` slot resolution
 
@@ -94,16 +136,23 @@ primitives, reusing rather than duplicating logic:
   runs, but returns the pairs instead of only a count.
 
 Both `count_git_status_files` and `count_open_processes`/`parse_lsof_pids`
-currently discard the detail needed here. Rather than changing their return
-types (which would ripple into `bs list`... except `bs list` no longer calls
-them) or duplicating the git/lsof invocation, add sibling functions in
-`worktree/mod.rs` that return the detailed rows, and have the count-only helpers
-either stay as thin wrappers or be reused directly by `find_available_slot`
-(unaffected). This avoids parsing `lsof`/`git status` output twice for the same
-call in `bs status`.
+currently discard the detail needed here, and are themselves now redundant: they
+were only ever used by the old stats column (removed) and by
+`find_available_slot`. `find_available_slot`'s
+`count_open_processes(&path)? > 0` check is semantically identical to
+`has_open_files(&path)?` (both just need "is there at least one open handle"),
+so `find_available_slot` switches to `has_open_files`, making
+`count_git_status_files`/`count_open_processes` fully dead code — deleted rather
+than kept as unused surface area. The boolean (`is_clean`/`has_open_files`) and
+full-detail (`git_status_lines`/ `list_open_processes`) siblings both already
+share their respective subprocess-invocation cores (`run_git_status_porcelain`,
+`run_lsof_raw`), so no new duplication is introduced by this consolidation — it
+removes a third, now-unnecessary count-only variant of each check.
 
-Overall classification for the report uses the same priority order as before:
-`Locked` > `InUse` (dirty or open handles) > `Available`.
+Overall classification for both `bs list` and `bs status` is produced by one
+shared function, `classify(locked, dirty, has_processes) -> WorktreeStatus` (see
+the `bs list` decision above), applying the same priority order: `Locked` >
+`InUse` (dirty or open handles) > `Available`.
 
 ### Output format
 
@@ -134,18 +183,26 @@ demanding sections that add no information).
 
 ## Risks / Trade-offs
 
-- **Breaking change for scripts parsing `bs list` output** → Called out
-  explicitly as **BREAKING** in the proposal; `bs status` is the documented
-  replacement for anything that needs per-slot state.
-- **Users who watched `bs list` to eyeball "which slots are busy" lose that
-  at-a-glance view** → Mitigated by keeping `bs list` fast/lightweight (its new
-  purpose) and making `bs status` fast enough to run per-slot on demand; a
-  future `watch bs status <path>` or shell loop covers the old use case without
-  paying the cost on every `bs list` invocation.
-- **Duplicated git/lsof invocation logic between the existing count-only helpers
-  and the new detail-returning helpers** → Mitigated by factoring the common
-  subprocess-invocation + line-parsing core so only the "what do we keep" step
-  differs (counts vs. rows), rather than duplicating the `Command::new` setup.
+- **Breaking change for scripts parsing `bs list` output** → Scoped to the stats
+  column only now (called out as **BREAKING** in the proposal); the status
+  badge's format is unchanged, so scripts relying on it are unaffected.
+  `bs status` is the documented replacement for anything that needs the removed
+  per-file/per-process detail.
+- **An all-available pool still pays the original per-slot `lsof` cost** → This
+  is the deliberate trade-off the user accepted: keeping the badge means
+  `bs list` cannot be unconditionally cheap, only cheap-when-possible (skipping
+  `lsof` for locked/dirty slots via early return). Documented explicitly in the
+  Performance Benchmarking section below rather than papered over with an
+  unrealistic SLO.
+- **Duplicated git/lsof invocation logic between count-only, boolean, and
+  detail-returning helpers** → Resolved by deleting the count-only helpers
+  (`count_git_status_files`, `count_open_processes`) now that both `bs list`
+  (boolean early-return) and `bs status` (full detail) are covered by the
+  boolean/detail sibling pairs, which already share their subprocess-invocation
+  cores.
+- **Two call sites (`bs list`, `bs status`) must agree on classification** →
+  Mitigated by routing both through one shared `classify()` function rather than
+  duplicating the `Locked` > `InUse` > `Available` priority logic.
 - **Lock reason parsing is new and untested against exotic git porcelain
   output** → Mitigated by keeping it strictly additive (falls back to no reason
   string) and covering it with unit tests against representative porcelain
@@ -154,35 +211,59 @@ demanding sections that add no information).
 ## Migration Plan
 
 No data migration; this is a CLI-only, single-binary change with no persisted
-state. Rollout is a normal release: update `bs list` and add `bs status`, update
-help text and specs, ship in the next version. Users pin to an older `bs`
-version if they depend on the old `bs list` columns until they migrate scripts
-to `bs status`.
+state. Rollout is a normal release: adjust `bs list` (drop stats column, keep
+badge with early-return checks) and add `bs status`, update help text and specs,
+ship in the next version. Users pin to an older `bs` version if they depend on
+the old `bs list` stats column until they migrate scripts to `bs status`.
 
 ## Performance Benchmarking
 
-To guard the performance goal this change makes (`bs list` becoming cheap and
-not scaling with pool size) against future regression, a Criterion benchmark
-(`benches/bs_ls.rs`) measures `worktree::list_pool_worktrees` across pool sizes
-(1/5/10/25/50 slots) using real, throwaway git worktrees, and also benchmarks
-the pre-change `worktree::list_worktrees_status` path at the same sizes purely
-as a before/after comparison baseline (not itself SLO-checked).
+The performance goal is revised from "`bs list` becomes cheap regardless of pool
+size" to "`bs list` avoids unnecessary `lsof`/`git status` calls via early
+return, but an all-clean/all-available pool is still bounded by one `lsof` call
+per slot" — keeping the badge means that goal can't be fully achieved for every
+workload, only for the common locked/dirty cases.
+
+A Criterion benchmark (`benches/bs_ls.rs`) measures the new
+`classify_slot_status`-based per-slot classification path (what `bs list` now
+calls) across pool sizes (1/5/10/25/50 slots) under three slot-mix scenarios
+using real, throwaway git worktrees and processes:
+
+1. **All locked** — exercises the fastest path (no `git status`/`lsof` calls at
+   all).
+2. **All dirty, unlocked** — exercises the middle path (`git status` only, no
+   `lsof`).
+3. **All clean, unlocked, available** — exercises the worst case (`git status` +
+   `lsof` for every slot), structurally identical in cost to the pre-change
+   `list_worktrees_status` path.
 
 `scripts/check-bs-ls-perf.sh` runs the benchmark and computes p95 per-iteration
-latency from Criterion's raw sample data (Criterion's `estimates.json` only
-reports mean/median/slope, not percentiles), then asserts the two SLOs codified
-as a requirement in `specs/worktree-list/spec.md`:
+latency from Criterion's raw sample data, then asserts SLOs codified as a
+requirement in `specs/worktree-list/spec.md`, calibrated separately per
+scenario:
 
-1. p95 @ 50 slots <= 50ms.
-2. p95 @ 50 slots / p95 @ 5 slots <= 2.5x.
+1. **Locked/dirty scenarios** (no or partial subprocess fan-out): p95 @ 50 slots
+   <= 50ms; scaling ratio p95@50/p95@5 <= 2.5x — same bar as originally
+   proposed, since these scenarios genuinely don't scale with pool size.
+2. **All-available scenario** (full subprocess fan-out, one `lsof` + one
+   `git status` per slot): tracked and reported, but **not CI-gated** with a
+   fixed absolute bound — its cost is dominated by `lsof`/`git status`
+   subprocess spawn overhead which scales with pool size by construction, so a
+   flat SLO here would either be unrealistically loose or would fail as soon as
+   pool sizes grow. Instead, this scenario is asserted only against a _scaling_
+   bound (e.g. p95@50/p95@5 within the same order of magnitude as the pre-change
+   baseline, generously bounded to catch a _regression beyond_ expected
+   linear-ish per-slot subprocess cost, not to promise sub-linear scaling that
+   isn't achievable here).
 
-Measured locally: the new `list_pool_worktrees` path scores ~6-7ms p95 @ 5 slots
-and ~12-13ms p95 @ 50 slots (ratio ~1.7-2.0x), comfortably inside both bounds.
-The old `list_worktrees_status` path (kept only as a benchmark comparison, not
-part of `bs list` after this change) scores ~79ms @ 5 slots and ~600ms @ 50
-slots (ratio ~7.6x), which is the magnitude of regression this benchmark is
-designed to catch if per-slot subprocess fan-out is ever reintroduced into
-`bs list`.
+Measured locally (indicative, to be re-confirmed once implemented): the
+locked/dirty scenarios are expected to track close to the previous
+`list_pool_worktrees`-only numbers (~6-7ms p95 @ 5 slots, ~12-13ms p95 @ 50
+slots), since they add at most one cheap boolean-returning subprocess call per
+slot beyond porcelain parsing. The all-available scenario is expected to track
+close to the old `list_worktrees_status` numbers (~79ms @ 5 slots, ~600ms @ 50
+slots) since it performs the same subprocess calls, just without the stats
+counting/formatting overhead.
 
 The check runs via `mise run bench` (cached via mise's `sources`/`outputs`, so
 it's skipped when `Cargo.toml`/`Cargo.lock`/`src/**/*.rs`/`benches/**/*.rs` are

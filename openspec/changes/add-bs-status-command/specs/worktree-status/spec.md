@@ -82,7 +82,9 @@ when applicable, the checked-out branch name (omitted for detached HEAD).
 ### Requirement: Report includes an overall classification using the same priority rules `bs list` used
 
 The report SHALL classify the slot as one of `locked`, `in use`, or `available`,
-using the same priority order previously used by `bs list`:
+using the same priority order `bs list`'s status badge uses — both are computed
+by one shared classification function so the two commands cannot disagree on a
+given slot:
 
 1. **`locked`** — if the slot is git-locked, regardless of other signals.
 2. **`in use`** — if the slot is not locked but has uncommitted changes,

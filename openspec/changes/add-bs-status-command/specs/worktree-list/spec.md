@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Each worktree is shown on its own line with path and branch only
+### Requirement: Each worktree is shown on its own line with path, branch, and status badge
 
 `bs list` SHALL print one line per managed pool worktree. Each line SHALL
 contain:
@@ -13,31 +13,34 @@ contain:
    immediately after the branch (or path when no branch is present), so that the
    active slot is visually distinct from the rest. All other lines SHALL retain
    their existing format without any prefix.
+4. A colored status badge — `available`, `in use`, or `locked` — reflecting the
+   slot's classification, computed using the same priority rules as `bs status`
+   (`locked` > `in use` > `available`).
 
-`bs list` SHALL NOT display a status badge (`available` / `in use` / `locked`)
-or a usage-stats column (`⚙N ±N ?N`). `bs list` SHALL NOT invoke `lsof` or
-`git status --porcelain` for any slot; detailed per-slot status (lock state,
-uncommitted/untracked files, open processes) is available via `bs status <path>`
-instead.
+`bs list` SHALL NOT display a usage-stats column (`⚙N ±N ?N`). Detailed per-slot
+status — itemized lock reason, uncommitted/untracked files, and open processes —
+is available via `bs status <path>` instead; `bs list`'s badge is limited to the
+three-way classification.
 
 #### Scenario: Single worktree, detached HEAD
 
 - **WHEN** the pool contains one slot in detached HEAD state
-- **THEN** stdout SHALL contain one line with the tilde-prefixed path and no
-  branch suffix, and no status badge or stats column
+- **THEN** stdout SHALL contain one line with the tilde-prefixed path, no branch
+  suffix, the status badge, and no stats column
 
 #### Scenario: Single worktree with a branch
 
 - **WHEN** the pool contains one slot with branch `main` checked out
 - **THEN** stdout SHALL contain one line with the tilde-prefixed path followed
-  by `(main)` in bold, and no status badge or stats column
+  by `(main)` in bold, the status badge, and no stats column
 
 #### Scenario: Mixed pool
 
-- **WHEN** the pool contains multiple slots regardless of their lock state,
-  dirty state, or open processes
-- **THEN** each slot SHALL appear on its own line with only its path and
-  optional branch — no badge or stats column SHALL appear for any slot
+- **WHEN** the pool contains multiple slots in different lock/dirty/open-process
+  states
+- **THEN** each slot SHALL appear on its own line with its path, optional
+  branch, and status badge reflecting its own classification — no stats column
+  SHALL appear for any slot
 
 #### Scenario: Current slot is marked in the list
 
@@ -67,80 +70,104 @@ instead.
 - **THEN** `bs list` SHALL still display all slots without a current indicator,
   without producing an error
 
-### Requirement: `bs list` does not perform per-slot availability checks
+### Requirement: `bs list` short-circuits per-slot availability checks
 
-`bs list` SHALL enumerate pool slots using only `git worktree list --porcelain`
-(a single git invocation). It SHALL NOT spawn `lsof`, SHALL NOT run
-`git status --porcelain` per slot, and SHALL NOT spawn per-slot threads for
-availability classification. Its cost SHALL NOT scale with the number of open
-processes or dirty files in any slot.
+For each slot, `bs list` SHALL determine the status badge using early-return
+short-circuiting, evaluating signals in increasing order of cost and stopping as
+soon as the classification is determined:
 
-#### Scenario: Listing does not shell out to `lsof`
+1. Lock state (free — from the already-parsed `git worktree list --porcelain`
+   output). If locked, `bs list` SHALL classify the slot `locked` **without**
+   invoking `git status` or `lsof` for that slot.
+2. Dirty/untracked file state (`git status --porcelain`, boolean check only — no
+   full parse of individual lines is required). If dirty and unlocked, `bs list`
+   SHALL classify the slot `in use` **without** invoking `lsof` for that slot.
+3. Open-process state (`lsof -w +d <slot>`, boolean check only). Evaluated only
+   when the slot is unlocked and clean, to distinguish `in use` (open processes
+   present) from `available`.
 
-- **WHEN** the user runs `bs list` against a pool with N slots
-- **THEN** `bs list` SHALL NOT invoke `lsof` for any slot
+`bs list` SHALL NOT compute or display per-file or per-process detail (counts or
+itemized lists); it SHALL NOT spawn per-slot threads for anything beyond this
+three-signal classification.
 
-#### Scenario: Listing does not run `git status` per slot
+#### Scenario: Locked slot skips git status and lsof
 
-- **WHEN** the user runs `bs list` against a pool with N slots
-- **THEN** `bs list` SHALL NOT invoke `git status --porcelain` for any slot
+- **WHEN** a pool slot is git-locked
+- **THEN** `bs list` SHALL NOT invoke `git status --porcelain` or `lsof` for
+  that slot
+
+#### Scenario: Dirty unlocked slot skips lsof
+
+- **WHEN** a pool slot is unlocked and has uncommitted or untracked files
+- **THEN** `bs list` SHALL NOT invoke `lsof` for that slot
+
+#### Scenario: Clean unlocked slot requires an lsof check
+
+- **WHEN** a pool slot is unlocked and has no uncommitted or untracked files
+- **THEN** `bs list` SHALL invoke `lsof` for that slot to distinguish `in use`
+  from `available`
 
 ## ADDED Requirements
 
-### Requirement: `bs list` meets a documented performance SLO
+### Requirement: `bs list` meets a documented performance SLO, calibrated per slot-state scenario
 
-`bs list`'s pool-scan latency SHALL be tracked and enforced by an automated
-benchmark (`benches/bs_ls.rs`, run via `mise run bench` /
-`scripts/check-bs-ls-perf.sh`) against the following SLOs, measured as p95
-latency over repeated in-process invocations of the pool-scan path
-(`worktree::list_pool_worktrees` plus rendering, excluding process startup) on a
-warm filesystem cache:
+`bs list`'s per-slot classification latency SHALL be tracked and enforced by an
+automated benchmark (`benches/bs_ls.rs`, run via `mise run bench` /
+`scripts/check-bs-ls-perf.sh`), measured as p95 latency over repeated in-process
+invocations of the classification path on a warm filesystem cache, with SLOs
+calibrated separately per slot-state scenario since the achievable bound depends
+on how many slots require an `lsof`/`git status` call:
 
-1. At a pool size of 50 managed worktree slots, p95 latency SHALL be **<=
-   50ms**.
-2. The scaling ratio of p95 latency at 50 slots vs. p95 latency at 5 slots SHALL
-   be **<= 2.5x** — i.e. a 10x increase in pool size SHALL NOT produce more than
-   a 2.5x increase in latency, confirming the scan's cost is dominated by a
-   fixed per-invocation overhead rather than growing proportionally with pool
-   size (a single `git worktree list --porcelain` call's own cost grows slightly
-   with worktree count, so a strict O(1)/flat bound is not realistic; 2.5x was
-   chosen empirically as comfortably above observed baseline noise for the fixed
-   path, ~1.7x-2.0x, while remaining far below the ~7-8x ratio measured for the
-   pre-change per-slot `lsof`/ `git status` fan-out this change removes).
+1. **All slots locked, or all slots dirty/unlocked** (no or partial subprocess
+   fan-out): at a pool size of 50 managed worktree slots, p95 latency SHALL be
+   **<= 50ms**, and the scaling ratio of p95 at 50 slots vs. p95 at 5 slots
+   SHALL be **<= 2.5x**.
+2. **All slots clean, unlocked, and available** (every slot requires both a
+   `git status` and an `lsof` call — the classification cost floor, identical in
+   shape to the pre-change per-slot fan-out this change's early return does not
+   eliminate for this scenario): latency is tracked and reported by the
+   benchmark but is **not** subject to a fixed absolute bound; instead, it is
+   checked against a scaling-regression bound (p95 at 50 slots SHALL NOT exceed
+   the pre-change `list_worktrees_status` baseline ratio by more than a
+   documented margin), to catch a regression beyond the expected cost of one
+   `lsof` + one `git status` call per slot, without demanding sub-linear scaling
+   that isn't achievable when every slot must be checked.
 
-This benchmark and its thresholds exist specifically to catch a regression back
-to per-slot subprocess fan-out (the exact problem this change fixes) being
-silently reintroduced in `bs list`.
+This benchmark and its thresholds exist specifically to catch (a) a regression
+back to per-slot subprocess fan-out for scenarios where early return should have
+avoided it (scenario 1), and (b) an unexpected additional cost beyond the
+inherent `lsof`/`git status` floor for the all-available scenario (scenario 2).
 
-#### Scenario: CI fails on an SLO violation
+#### Scenario: CI fails on an SLO violation in the locked/dirty scenarios
 
 - **WHEN** `scripts/check-bs-ls-perf.sh` is run (locally via `mise run bench`,
   in the `pre-commit` git hook when `src/**/*.rs` or `benches/**/*.rs` change,
-  or in CI on every push/PR)
+  or in CI on every push/PR) against the all-locked or all-dirty benchmark
+  scenarios
 - **THEN** it SHALL exit non-zero and print which SLO was violated (absolute p95
   bound, scaling ratio bound, or both) if either threshold above is exceeded
 - **THEN** it SHALL exit zero and print the measured p95 values when both
   thresholds are met
 
+#### Scenario: All-available scenario is reported but not hard-gated on an absolute bound
+
+- **WHEN** `scripts/check-bs-ls-perf.sh` is run against the all-available
+  benchmark scenario
+- **THEN** it SHALL print the measured p95 values at each pool size
+- **THEN** it SHALL fail only if the measured cost regresses beyond the
+  documented pre-change baseline margin, not merely for being slower than the
+  locked/dirty scenarios' absolute bound
+
 ## REMOVED Requirements
-
-### Requirement: Available status means clean, unlocked, and not opened by any process at the slot root
-
-**Reason**: `bs list` no longer computes or displays per-slot availability
-status; enumerating a pool no longer requires per-slot `lsof`/`git status`
-checks. This classification logic is preserved, unchanged in its priority rules,
-under `bs status` (see `specs/worktree-status/spec.md`).
-
-**Migration**: Use `bs status <path>` (or `bs status` from inside the slot) to
-see whether a specific slot is `locked`, `in use`, or `available`.
 
 ### Requirement: Per-slot status checks are performed concurrently
 
-**Reason**: `bs list` no longer performs per-slot status checks at all, so
-concurrency across slots during `list` is no longer applicable. `bs status` only
-ever inspects one slot per invocation, so no cross-slot concurrency is needed
-there either.
+**Reason**: Superseded by the early-return short-circuiting requirement above
+("`bs list` short-circuits per-slot availability checks"), which subsumes the
+concurrency requirement: per-slot classification is still performed concurrently
+(one thread per slot, as before), but each thread now also short-circuits
+internally instead of always running both `git status` and `lsof` to completion.
 
-**Migration**: No action needed; `bs list` is now fast without concurrency
-tricks. Running `bs status` for multiple slots (e.g. in a shell loop) is the
-replacement if a user needs status for several slots at once.
+**Migration**: No action needed; the replacement requirement covers both the
+concurrency-across-slots behavior (unchanged) and the new short-circuiting
+behavior (new).
