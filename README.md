@@ -30,6 +30,39 @@ in use     ~/.bonsai/myrepo/c9d0e1f2 (my-feature)
 $ bs help
 ```
 
+## tmux Integration
+
+`bs get --tmux-session` creates (or reuses) a tmux session rooted at the
+provisioned worktree slot, and attaches your terminal to it:
+
+```bash
+# Default session name: 🌳 <repo-name> (<branch-display>)
+$ bs get --tmux-session
+
+# Combine with -b/-B/<branch> to name the session after that branch
+$ bs get -b my-feature --tmux-session
+
+# Use a custom session name instead of the derived default
+$ bs get --tmux-session=my-custom-session
+
+# Create the session in the background without attaching/switching to it
+$ bs get --tmux-session --no-attach
+```
+
+Notes:
+
+- `--tmux-session` requires `tmux` to be installed and on `PATH`; `bs get` exits
+  non-zero with an actionable error if it is not found. Plain `bs get` (no
+  `--tmux-session`) never checks for or invokes `tmux`.
+- `--no-attach` requires `--tmux-session`.
+- `--no-attach` sessions are **not** automatically cleaned up — use
+  `tmux kill-session -t <name>` when you're done with one.
+
+> **Note:** the external `worktree-get` dotfiles script currently re-implements
+> this same tmux session-naming/creation logic itself. A follow-up change will
+> slim it down to a thin wrapper that passes `--tmux-session` through to
+> `bs get` instead.
+
 ## Install
 
 **Prerequisites:** [mise](https://mise.jdx.dev/).

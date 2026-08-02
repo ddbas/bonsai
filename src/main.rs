@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize as _;
 
 use bonsai::logging;
+use bonsai::tmux;
 use bonsai::worktree;
 
 #[derive(Parser)]
@@ -81,6 +82,32 @@ enum Commands {
         /// Overwrites an existing branch without error (mirrors `git checkout -B`).
         #[arg(short = 'B', value_name = "BRANCH", conflicts_with = "new_branch")]
         reset_branch: Option<String>,
+
+        /// Create (or reuse) a tmux session rooted at the provisioned slot.
+        ///
+        /// With no value, the session name defaults to the `worktree-get`
+        /// naming convention: `🌳 <repo-name> (<branch-display>)`, where
+        /// `<branch-display>` is the resolved branch name when one was
+        /// checked out via `<branch>`, `-b`, or `-B`, or `detached` when none
+        /// was requested. Pass an explicit value (`--tmux-session=NAME`) to
+        /// use that name instead. Requires `tmux` to be installed and on
+        /// `PATH`; the command exits non-zero with an actionable error if it
+        /// is not found. Without this flag, `bs get` never invokes tmux.
+        #[arg(
+            long = "tmux-session",
+            value_name = "NAME",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        tmux_session: Option<String>,
+
+        /// Do not attach/switch the invoking terminal to the tmux session
+        /// created (or reused) by `--tmux-session`; the session is created in
+        /// the background and the command exits normally. Requires
+        /// `--tmux-session`. Note: `--no-attach` sessions are not
+        /// automatically cleaned up; use `tmux kill-session` to remove them.
+        #[arg(long = "no-attach", requires = "tmux_session")]
+        no_attach: bool,
     },
 
     /// List all managed worktrees in the pool with their availability status.
@@ -350,7 +377,15 @@ fn run() -> anyhow::Result<()> {
             branch,
             new_branch,
             reset_branch,
+            tmux_session,
+            no_attach,
         }) => {
+            // Check up front (before provisioning) so a missing `tmux` fails
+            // fast without leaving a half-completed operation behind.
+            if tmux_session.is_some() {
+                tmux::check_tmux_available()?;
+            }
+
             let branch = match (branch, new_branch, reset_branch) {
                 (Some(b), None, None) => Some(worktree::BranchMode::Existing(b)),
                 (None, Some(b), None) => Some(worktree::BranchMode::New(b)),
@@ -367,6 +402,17 @@ fn run() -> anyhow::Result<()> {
             match branch_name.as_deref() {
                 Some(b) => println!("🌳 {}  ({})", path.display(), b),
                 None => println!("🌳 {}", path.display()),
+            }
+
+            if let Some(value) = tmux_session {
+                let repo_name = worktree::repo_slug()?;
+                let branch_display = branch_name.as_deref().unwrap_or(tmux::DETACHED_LABEL);
+                let session_name = tmux::resolve_session_name(&value, &repo_name, branch_display);
+                tmux::ensure_session(&session_name, &path)?;
+                println!("\u{1f5a5}\u{fe0f}  tmux session: {}", session_name);
+                if !no_attach {
+                    tmux::attach_session(&session_name)?;
+                }
             }
         }
 
