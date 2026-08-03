@@ -87,6 +87,14 @@ mise run install
 
 Make sure `~/.local/bin` is on your `PATH`.
 
+### Agent Skill
+
+To install the Bonsai CLI skill for agents, run:
+
+```bash
+npx skills add ddbas/bonsai --skill bonsai
+```
+
 ## Logging
 
 Bonsai automatically logs detailed information about its operations to help
