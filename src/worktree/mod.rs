@@ -313,6 +313,96 @@ pub fn new_slot_path(pool_dir: &Path) -> PathBuf {
     pool_dir.join(prefix)
 }
 
+// -- Copy configured ignored files (bonsai.copy) -----------------------------
+
+/// Read the multi-valued `bonsai.copy` git config key, resolved from `dir`
+/// (the origin worktree), via `git config --get-all bonsai.copy`.
+///
+/// Returns the configured entries in git's own config order (local +
+/// global, additive). When the key is not set anywhere, `git config
+/// --get-all` exits with status 1 and empty output/stderr — that case is
+/// treated as an empty `Vec` rather than an error. Any other non-zero exit
+/// (e.g. a corrupt config file, which prints a diagnostic to stderr) is
+/// surfaced as a genuine error.
+pub fn configured_copy_paths(dir: &Path) -> Result<Vec<String>> {
+    let output = git_cmd()
+        .args([
+            "-C",
+            &dir.to_string_lossy(),
+            "config",
+            "--get-all",
+            "bonsai.copy",
+        ])
+        .output()
+        .context("failed to spawn `git config --get-all bonsai.copy`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            // Key not set anywhere — not an error.
+            return Ok(Vec::new());
+        }
+        bail!("`git config --get-all bonsai.copy` failed: {}", stderr);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// Copy each relative path in `entries` from `origin_root` into the
+/// corresponding relative path under `slot_path`.
+///
+/// Missing source files are skipped silently (best-effort semantics for
+/// `bonsai.copy`); destination parent directories are created as needed.
+/// Genuine copy failures (e.g. permission errors) are propagated.
+pub fn copy_ignored_files(origin_root: &Path, slot_path: &Path, entries: &[String]) -> Result<()> {
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+
+    for entry in entries {
+        let source = origin_root.join(entry);
+        if !source.exists() {
+            tracing::debug!(
+                "bonsai.copy: skipping missing source file {}",
+                source.display()
+            );
+            skipped += 1;
+            continue;
+        }
+
+        let dest = slot_path.join(entry);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create destination directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        std::fs::copy(&source, &dest).with_context(|| {
+            format!("failed to copy {} to {}", source.display(), dest.display())
+        })?;
+        copied += 1;
+    }
+
+    if copied > 0 || skipped > 0 {
+        tracing::info!(
+            "bonsai.copy: copied {} file(s), skipped {} missing entry(ies) into {}",
+            copied,
+            skipped,
+            slot_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 // -- Path helpers -------------------------------------------------------------
 
 /// Replace the home directory prefix in `path` with `~`.
@@ -1003,6 +1093,11 @@ pub fn create_slot(slot_path: &Path, head_sha: &str, branch: Option<&BranchMode>
 /// behaviour). Pass `Some(BranchMode::New(…))` or `Some(BranchMode::Reset(…))`
 /// to have the slot checked out on a named branch in a single git subprocess.
 pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
+    // Capture the origin worktree's CWD before any slot path changes; this is
+    // both the source root for `bonsai.copy` entries and the directory `git
+    // config --get-all bonsai.copy` is resolved from.
+    let origin_dir = std::env::current_dir().context("failed to get current directory")?;
+
     // Single subprocess: git rev-parse HEAD --git-common-dir
     let (head_sha, common_dir) = resolve_head_and_common_dir()?;
     let repo_root = common_dir
@@ -1056,6 +1151,15 @@ pub fn get_worktree(branch: Option<BranchMode>) -> Result<PathBuf> {
             new_slot
         }
     };
+
+    // Copy any `bonsai.copy`-configured ignored files from the origin
+    // worktree into the slot as the final provisioning step, after the slot
+    // has reached its final (created/reset + checked-out) state. Runs
+    // identically for both the reused-slot and new-slot branches above.
+    let copy_entries = configured_copy_paths(&origin_dir)?;
+    if !copy_entries.is_empty() {
+        copy_ignored_files(&origin_dir, &slot_path, &copy_entries)?;
+    }
 
     slot_path
         .canonicalize()
@@ -1853,6 +1957,158 @@ mod tests {
             result,
             Some(entry.path),
             "a locked slot checked out on {branch} should still be returned"
+        );
+    }
+
+    // -- configured_copy_paths ------------------------------------------------
+
+    /// Initialise a throwaway git repo in a fresh temp dir, suitable for
+    /// running `git config` commands against without touching host config.
+    fn init_scratch_repo() -> tempfile::TempDir {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        // Use `git_cmd()` (not a bare `Command`) so hook-injected `GIT_DIR`/
+        // `GIT_WORK_TREE`/etc. env vars (e.g. when tests run inside a
+        // pre-commit hook) don't redirect this `git init` at the real repo.
+        let status = git_cmd()
+            .args(["-C", &dir.path().to_string_lossy(), "init", "-q"])
+            .status()
+            .expect("spawn git init");
+        assert!(status.success(), "git init failed");
+        dir
+    }
+
+    fn git_config_add(dir: &Path, key: &str, value: &str) {
+        let status = git_cmd()
+            .args(["-C", &dir.to_string_lossy(), "config", "--add", key, value])
+            .status()
+            .expect("spawn git config --add");
+        assert!(status.success(), "git config --add failed");
+    }
+
+    #[test]
+    fn configured_copy_paths_unset_returns_empty() {
+        let dir = init_scratch_repo();
+        let entries = configured_copy_paths(dir.path()).expect("should not error");
+        assert!(
+            entries.is_empty(),
+            "unset bonsai.copy should return an empty Vec, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn configured_copy_paths_single_entry() {
+        let dir = init_scratch_repo();
+        git_config_add(dir.path(), "bonsai.copy", ".env");
+        let entries = configured_copy_paths(dir.path()).expect("should not error");
+        assert_eq!(entries, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn configured_copy_paths_multiple_entries_preserve_order() {
+        let dir = init_scratch_repo();
+        git_config_add(dir.path(), "bonsai.copy", ".env");
+        git_config_add(dir.path(), "bonsai.copy", "config/local.json");
+        git_config_add(dir.path(), "bonsai.copy", ".idea/workspace.xml");
+        let entries = configured_copy_paths(dir.path()).expect("should not error");
+        assert_eq!(
+            entries,
+            vec![
+                ".env".to_string(),
+                "config/local.json".to_string(),
+                ".idea/workspace.xml".to_string(),
+            ]
+        );
+    }
+
+    // -- copy_ignored_files ---------------------------------------------------
+
+    #[test]
+    fn copy_ignored_files_copies_existing_file() {
+        use tempfile::TempDir;
+
+        let origin = TempDir::new().expect("origin dir");
+        let slot = TempDir::new().expect("slot dir");
+        std::fs::write(origin.path().join(".env"), "SECRET=1").expect("write .env");
+
+        copy_ignored_files(origin.path(), slot.path(), &[".env".to_string()])
+            .expect("copy_ignored_files should not error");
+
+        let copied = std::fs::read_to_string(slot.path().join(".env")).expect("read copied file");
+        assert_eq!(copied, "SECRET=1");
+    }
+
+    #[test]
+    fn copy_ignored_files_skips_missing_source_and_continues() {
+        use tempfile::TempDir;
+
+        let origin = TempDir::new().expect("origin dir");
+        let slot = TempDir::new().expect("slot dir");
+        std::fs::write(origin.path().join("present.txt"), "here").expect("write present.txt");
+
+        copy_ignored_files(
+            origin.path(),
+            slot.path(),
+            &["missing.txt".to_string(), "present.txt".to_string()],
+        )
+        .expect("missing source files should be skipped, not error");
+
+        assert!(
+            !slot.path().join("missing.txt").exists(),
+            "missing source file should not appear in the destination"
+        );
+        assert_eq!(
+            std::fs::read_to_string(slot.path().join("present.txt")).expect("read present.txt"),
+            "here",
+            "remaining entries should still be copied"
+        );
+    }
+
+    #[test]
+    fn copy_ignored_files_creates_destination_subdirectory() {
+        use tempfile::TempDir;
+
+        let origin = TempDir::new().expect("origin dir");
+        let slot = TempDir::new().expect("slot dir");
+        std::fs::create_dir_all(origin.path().join("config")).expect("create origin config dir");
+        std::fs::write(origin.path().join("config/local.json"), "{}")
+            .expect("write config/local.json");
+
+        copy_ignored_files(
+            origin.path(),
+            slot.path(),
+            &["config/local.json".to_string()],
+        )
+        .expect("copy_ignored_files should not error");
+
+        assert!(
+            slot.path().join("config").is_dir(),
+            "destination parent directory should be created automatically"
+        );
+        assert_eq!(
+            std::fs::read_to_string(slot.path().join("config/local.json"))
+                .expect("read copied nested file"),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn copy_ignored_files_empty_list_is_noop() {
+        use tempfile::TempDir;
+
+        let origin = TempDir::new().expect("origin dir");
+        let slot = TempDir::new().expect("slot dir");
+
+        copy_ignored_files(origin.path(), slot.path(), &[])
+            .expect("empty entry list should be a no-op, not an error");
+
+        assert_eq!(
+            std::fs::read_dir(slot.path())
+                .expect("read slot dir")
+                .count(),
+            0,
+            "slot dir should remain empty when the entry list is empty"
         );
     }
 }

@@ -75,6 +75,50 @@ Notes:
 > slim it down to a thin wrapper that passes `--tmux-session` through to
 > `bs get` instead.
 
+## Configuration
+
+Bonsai has no configuration file of its own; repo-scoped behavior is configured
+entirely via `git config`, under the `bonsai.*` namespace.
+
+### `bonsai.copy` — carry git-ignored files into new/reused slots
+
+A freshly provisioned or reused pool slot only ever contains git-tracked
+content. Files you keep around but never commit — `.env`, local override
+configs, IDE settings — don't automatically follow you into a new slot. The
+multi-valued `bonsai.copy` git config key lets you declare, once, a list of
+relative file paths that `bs get` should copy from the "origin" worktree (the
+worktree you ran `bs get` from) into the provisioned slot, as the final step of
+provisioning (after the slot has been created or reset and the branch checked
+out).
+
+```bash
+# Add one entry (repeat --add for each additional file)
+$ git config --add bonsai.copy .env
+$ git config --add bonsai.copy config/local.json
+
+# Inspect what's currently configured
+$ git config --get-all bonsai.copy
+.env
+config/local.json
+```
+
+Set it locally (per-repo, `.git/config`) or globally (`~/.gitconfig`) — both are
+honored, using git's normal config precedence/merging rules for multi-valued
+keys.
+
+Notes:
+
+- Entries are relative file paths (not directories or globs); nested paths (e.g.
+  `config/local.json`) have their parent directories created automatically in
+  the slot if needed.
+- **A listed file that doesn't exist in the origin worktree is silently
+  skipped** — no error, no warning. `bonsai.copy` is a best-effort list, not a
+  strict manifest, so don't mistake a missing copy for a bug; verify your
+  configured entries with `git config --get-all bonsai.copy` and confirm the
+  file actually exists in the origin worktree.
+- When `bonsai.copy` is unset, `bs get` behaves exactly as before this feature
+  existed — no extra filesystem operations are performed.
+
 ## Install
 
 **Prerequisites:** [mise](https://mise.jdx.dev/).
