@@ -1,0 +1,77 @@
+## 1. Config reading
+
+- [ ] 1.1 Add a helper in `src/worktree/mod.rs` (e.g. `configured_copy_paths`)
+      that runs `git config --get-all bonsai.copy` from a given directory (the
+      origin worktree) via the existing `git_cmd()` helper and returns
+      `Vec<String>` of configured entries, preserving order
+- [ ] 1.2 Treat a non-zero/empty-result exit from `git config --get-all` (key
+      not set) as an empty list rather than an error, while still surfacing
+      genuine git errors (e.g. corrupt config)
+- [ ] 1.3 Unit test: no `bonsai.copy` set returns an empty `Vec`
+- [ ] 1.4 Unit test: single `bonsai.copy` entry is parsed correctly
+- [ ] 1.5 Unit test: multiple `bonsai.copy` entries (via repeated `--add`) are
+      returned in config order
+
+## 2. File copy helper
+
+- [ ] 2.1 Add a helper (e.g. `copy_ignored_files`) that takes the origin
+      worktree root, the destination slot path, and the list of relative paths,
+      and copies each existing source file to the corresponding destination path
+- [ ] 2.2 Create destination parent directories as needed (`create_dir_all`)
+      before copying each file
+- [ ] 2.3 Skip silently (no error) when a source file does not exist; propagate
+      errors for genuine copy failures (e.g. permission denied)
+- [ ] 2.4 Unit test: copying a file that exists succeeds and destination content
+      matches source
+- [ ] 2.5 Unit test: a missing source file is skipped without error, and
+      remaining entries still get processed
+- [ ] 2.6 Unit test: destination subdirectory that doesn't exist is created
+      automatically
+- [ ] 2.7 Unit test: empty file list is a no-op
+
+## 3. Wire into `get_worktree`
+
+- [ ] 3.1 Capture the origin worktree's current working directory at the start
+      of `get_worktree` (before any slot path changes)
+- [ ] 3.2 After the slot is created (`create_slot`) or reset (`reset_slot`) and
+      before the final `canonicalize`/return, read `bonsai.copy` from the origin
+      worktree and call the copy helper with (origin root, slot path, entries)
+- [ ] 3.3 Ensure the copy step runs identically for both the "reuse existing
+      slot" and "create new slot" branches in `get_worktree`
+- [ ] 3.4 Add `tracing` debug/info logging for the copy step (number of files
+      copied, entries skipped), consistent with existing logging style in the
+      module
+
+## 4. Integration tests
+
+- [ ] 4.1 Add a new test file (e.g. `tests/worktree_copy_ignored_files.rs`)
+      following the conventions in `tests/worktree_get.rs` /
+      `tests/common/mod.rs`
+- [ ] 4.2 Test: `bonsai.copy` configured with a file present in the origin
+      worktree results in that file existing in the newly created slot after
+      `bs get`
+- [ ] 4.3 Test: same as above but for a slot that is reused (already exists and
+      is available) rather than newly created
+- [ ] 4.4 Test: `bonsai.copy` listing a nonexistent file does not cause `bs get`
+      to fail, and other configured files are still copied
+- [ ] 4.5 Test: with `bonsai.copy` unset, `bs get` behavior and output are
+      unchanged (regression guard)
+- [ ] 4.6 Test: `bonsai.copy` entry with a nested relative path (e.g.
+      `config/local.json`) is copied with parent directories created in the slot
+
+## 5. Documentation
+
+- [ ] 5.1 Document the `bonsai.copy` git config key (namespace, multi-value
+      usage, example `git config --add bonsai.copy .env`) in the project README
+      or CLI help text, matching how other bonsai behaviors are documented
+- [ ] 5.2 Note the silent-skip-on-missing-file behavior in the documentation so
+      it isn't mistaken for a bug
+
+## 6. Validation
+
+- [ ] 6.1 Run `cargo fmt` and
+      `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] 6.2 Run the full test suite (`cargo test`) and confirm all new and
+      existing tests pass
+- [ ] 6.3 Manually verify with a real `bonsai.copy` config against a throwaway
+      repo: reused slot, new slot, and missing-file scenarios
