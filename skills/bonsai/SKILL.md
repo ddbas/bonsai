@@ -2,8 +2,8 @@
 name: bonsai
 description:
   Use this tool when you need to perform operations on git worktrees, such as
-  creating new worktrees, listing existing ones, or retrieving specific worktree
-  information.
+  creating new worktrees, listing existing ones, retrieving worktree status
+  information and more.
 argument-hint: <git worktree query>
 author: David Bastien (ddbas)
 ---
@@ -74,3 +74,10 @@ bs status
 
 Pass a worktree path to `bs status <worktree-path>` to get the status of a
 specific worktree.
+
+Prune the worktree pool to free up disk space
+
+```sh
+bs prune
+# 🗑️   pruned ~/.bonsai/repo-name/5b0ea303  (branch-name)
+```
