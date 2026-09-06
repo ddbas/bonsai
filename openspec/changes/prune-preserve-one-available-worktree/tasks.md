@@ -72,4 +72,4 @@
       `openspec/changes/prune-preserve-one-available-worktree/specs/worktree-prune/spec.md`
       against the final implementation and adjust wording/scenarios if the
       implementation diverged.
-- [ ] 5.2 Commit and push the change per repo conventions.
+- [x] 5.2 Commit and push the change per repo conventions.
