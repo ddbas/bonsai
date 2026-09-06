@@ -144,6 +144,19 @@ enum Commands {
     /// and metadata (version, effective log level) as `key: value` lines.
     /// Performs no filesystem writes.
     Info,
+
+    /// Reclaim disk space by deleting unused (`available`) bonsai pool slots
+    /// for the current repository, then running `git worktree prune`.
+    ///
+    /// Classifies every managed pool slot using the same `available` /
+    /// `in use` / `locked` rules as `bs list`/`bs status`. Only slots
+    /// classified `available` have their on-disk directory deleted; `locked`
+    /// and `in use` slots are never touched. After deleting, `git worktree
+    /// prune` is run exactly once so git deregisters the removed slots — `bs
+    /// prune` never edits git's worktree bookkeeping directly. Prints the
+    /// tilde-abbreviated path (and branch, if any) of each pruned slot.
+    /// Exits 0 unless at least one slot's directory failed to delete.
+    Prune,
 }
 
 fn format_current_path(tilde: &str, branch: Option<&str>) -> String {
@@ -553,6 +566,45 @@ fn run() -> anyhow::Result<()> {
             println!("log directory: {}", log_dir_tilde);
             println!("current log file: {}", current_log_file_tilde);
             println!("managed root: {}", managed_root_tilde);
+        }
+
+        Some(Commands::Prune) => {
+            let root = worktree::managed_root()?;
+            let slug = worktree::repo_slug()?;
+            let pool_dir = root.join(&slug);
+
+            if !pool_dir.exists() {
+                println!("No worktrees managed for this repository (pool does not exist yet).");
+                println!("Nothing to prune.");
+                return Ok(());
+            }
+
+            let outcome = worktree::prune_pool(&pool_dir)?;
+
+            if outcome.pruned.is_empty() && outcome.failures.is_empty() {
+                println!("Nothing to prune (no available slots).");
+                return Ok(());
+            }
+
+            for slot in &outcome.pruned {
+                let tilde = worktree::tilde_path(&slot.path);
+                println!(
+                    "\u{1f5d1}\u{fe0f}  pruned {}",
+                    format_current_path(&tilde, slot.branch.as_deref())
+                );
+            }
+
+            if !outcome.failures.is_empty() {
+                for (path, err) in &outcome.failures {
+                    let tilde = worktree::tilde_path(path);
+                    eprintln!("error: failed to prune {}: {}", tilde, err);
+                }
+                anyhow::bail!(
+                    "failed to prune {} of {} available slot(s)",
+                    outcome.failures.len(),
+                    outcome.pruned.len() + outcome.failures.len()
+                );
+            }
         }
     }
 
