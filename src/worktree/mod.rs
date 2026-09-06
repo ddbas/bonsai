@@ -1231,6 +1231,95 @@ pub fn current_worktree() -> Result<Option<(PathBuf, Option<String>)>> {
     find_slot_for_cwd(&cwd, &pool_dir)
 }
 
+// -- Prune (section: `bs prune`) ---------------------------------------------
+
+/// A single pool slot that `bs prune` deleted (or attempted to delete), with
+/// the identifying info (path + branch) needed for CLI reporting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunedSlot {
+    pub path: PathBuf,
+    /// The checked-out branch name, or `None` for detached HEAD.
+    pub branch: Option<String>,
+}
+
+/// Result of a full `prune_pool` run: the slots successfully pruned, and any
+/// per-slot deletion failures (path + error message), in the order
+/// encountered. `git worktree prune` is always attempted regardless of
+/// per-slot outcomes.
+#[derive(Debug, Default)]
+pub struct PruneOutcome {
+    pub pruned: Vec<PrunedSlot>,
+    pub failures: Vec<(PathBuf, String)>,
+}
+
+/// Return every pool slot classified [`WorktreeStatus::Available`] for
+/// `pool_dir`, as `(path, branch)` pairs.
+///
+/// Reuses [`list_worktrees_status`] (the same classification `bs list`
+/// uses) rather than writing new porcelain-parsing logic, so `bs prune` and
+/// `bs list` can never disagree about which slots are available.
+pub fn prune_available_slots(pool_dir: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
+    let entries = list_worktrees_status(pool_dir)?;
+    Ok(entries
+        .into_iter()
+        .filter(|(_, status, _)| *status == WorktreeStatus::Available)
+        .map(|(path, _, branch)| (path, branch))
+        .collect())
+}
+
+/// Delete a single slot's on-disk directory via [`std::fs::remove_dir_all`].
+///
+/// Performs no git operations; deregistration is left entirely to a
+/// subsequent `git worktree prune` call (see [`git_worktree_prune`]).
+pub fn delete_slot_dir(path: &Path) -> Result<()> {
+    std::fs::remove_dir_all(path)
+        .with_context(|| format!("failed to delete slot directory {}", path.display()))
+}
+
+/// Run `git worktree prune`, letting git deregister any worktree entries
+/// whose administrative files point at directories that no longer exist on
+/// disk.
+///
+/// This is the only place `bs prune` touches git's worktree bookkeeping; no
+/// `.git/worktrees/*` file is ever edited directly by bonsai.
+pub fn git_worktree_prune() -> Result<()> {
+    let output = git_cmd()
+        .args(["worktree", "prune"])
+        .output()
+        .context("failed to spawn `git worktree prune`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`git worktree prune` failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// Prune every available slot in `pool_dir`: enumerate available slots,
+/// attempt to delete each directory (collecting successes and per-slot
+/// failures without aborting the run), then always run `git worktree prune`
+/// once at the end regardless of per-slot outcomes.
+///
+/// Returns a [`PruneOutcome`] the CLI layer uses to report pruned slots and
+/// any failures. Only propagates an error if `git_worktree_prune` itself
+/// fails to spawn/exits non-zero, or if enumerating slots fails; individual
+/// deletion failures are captured in `PruneOutcome::failures` instead.
+pub fn prune_pool(pool_dir: &Path) -> Result<PruneOutcome> {
+    let candidates = prune_available_slots(pool_dir)?;
+
+    let mut outcome = PruneOutcome::default();
+    for (path, branch) in candidates {
+        match delete_slot_dir(&path) {
+            Ok(()) => outcome.pruned.push(PrunedSlot { path, branch }),
+            Err(err) => outcome.failures.push((path, format!("{err:#}"))),
+        }
+    }
+
+    git_worktree_prune()?;
+
+    Ok(outcome)
+}
+
 // -- Unit Tests ---------------------------------------------------------------
 
 #[cfg(test)]

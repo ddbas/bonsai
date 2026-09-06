@@ -214,3 +214,29 @@ log directory: ~/Library/Application Support/bonsai/logs
 The `bs info` command performs no filesystem writes and will succeed even if
 logging has never been initialized, making it safe to use as a first debugging
 step when bonsai encounters issues.
+
+## Reclaiming Disk Space
+
+### `bs prune` – Delete Unused Pool Slots
+
+Over time, unused pool slots accumulate on disk. `bs prune` reclaims that space
+for the current repository:
+
+1. Every managed pool slot is classified `available` / `in use` / `locked`,
+   using the same rules as `bs list`/`bs status`.
+2. The on-disk directory of every `available` slot is deleted. `in use` and
+   `locked` slots are never touched.
+3. `git worktree prune` is run once, so git deregisters the worktrees whose
+   directories were just deleted. `bs prune` never edits git's worktree
+   bookkeeping directly — that's entirely `git worktree prune`'s job.
+
+```bash
+$ bs prune
+🗑️  pruned ~/.bonsai/myrepo/a1b2c3d4
+🗑️  pruned ~/.bonsai/myrepo/e3f4a5b6  (my-feature)
+```
+
+If there is nothing to prune (no pool yet, or no `available` slots), `bs prune`
+prints a friendly message and exits `0` without deleting anything. If deleting
+one slot's directory fails, `bs prune` reports that failure, still prunes the
+remaining available slots and runs `git worktree prune`, and exits non-zero.
