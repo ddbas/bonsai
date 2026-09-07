@@ -1,3 +1,5 @@
 # Build
 target/
 
+# MacOS
+.DS_Store
