@@ -149,13 +149,17 @@ enum Commands {
     /// for the current repository, then running `git worktree prune`.
     ///
     /// Classifies every managed pool slot using the same `available` /
-    /// `in use` / `locked` rules as `bs list`/`bs status`. Only slots
-    /// classified `available` have their on-disk directory deleted; `locked`
-    /// and `in use` slots are never touched. After deleting, `git worktree
-    /// prune` is run exactly once so git deregisters the removed slots — `bs
-    /// prune` never edits git's worktree bookkeeping directly. Prints the
-    /// tilde-abbreviated path (and branch, if any) of each pruned slot.
-    /// Exits 0 unless at least one slot's directory failed to delete.
+    /// `in use` / `locked` rules as `bs list`/`bs status`. Among slots
+    /// classified `available`, exactly one is always preserved (kept on disk
+    /// and registered) to keep the pool warm — detaching its branch first if
+    /// it had one checked out — and the rest have their on-disk directories
+    /// deleted; `locked` and `in use` slots are never touched. After
+    /// deleting, `git worktree prune` is run exactly once so git deregisters
+    /// the removed slots — `bs prune` never edits git's worktree bookkeeping
+    /// directly. Prints the tilde-abbreviated path (and branch, if any) of
+    /// each pruned slot, and a distinct line for the preserved slot. Exits 0
+    /// unless a slot's directory failed to delete or the preserved slot
+    /// failed to detach.
     Prune,
 }
 
@@ -581,7 +585,10 @@ fn run() -> anyhow::Result<()> {
 
             let outcome = worktree::prune_pool(&pool_dir)?;
 
-            if outcome.pruned.is_empty() && outcome.failures.is_empty() {
+            if outcome.pruned.is_empty()
+                && outcome.failures.is_empty()
+                && outcome.preserve_failure.is_none()
+            {
                 println!("Nothing to prune (no available slots).");
                 return Ok(());
             }
@@ -594,15 +601,28 @@ fn run() -> anyhow::Result<()> {
                 );
             }
 
-            if !outcome.failures.is_empty() {
-                for (path, err) in &outcome.failures {
-                    let tilde = worktree::tilde_path(path);
-                    eprintln!("error: failed to prune {}: {}", tilde, err);
-                }
+            let mut failure_count = outcome.failures.len();
+            let total = outcome.pruned.len()
+                + outcome.failures.len()
+                + usize::from(outcome.preserved.is_some())
+                + usize::from(outcome.preserve_failure.is_some());
+
+            for (path, err) in &outcome.failures {
+                let tilde = worktree::tilde_path(path);
+                eprintln!("error: failed to prune {}: {}", tilde, err);
+            }
+
+            if let Some((path, err)) = &outcome.preserve_failure {
+                failure_count += 1;
+                let tilde = worktree::tilde_path(path);
+                eprintln!("error: failed to detach preserved slot {}: {}", tilde, err);
+            }
+
+            if failure_count > 0 {
                 anyhow::bail!(
                     "failed to prune {} of {} available slot(s)",
-                    outcome.failures.len(),
-                    outcome.pruned.len() + outcome.failures.len()
+                    failure_count,
+                    total
                 );
             }
         }

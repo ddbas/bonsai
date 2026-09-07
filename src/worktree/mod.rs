@@ -1242,29 +1242,59 @@ pub struct PrunedSlot {
     pub branch: Option<String>,
 }
 
-/// Result of a full `prune_pool` run: the slots successfully pruned, and any
-/// per-slot deletion failures (path + error message), in the order
-/// encountered. `git worktree prune` is always attempted regardless of
-/// per-slot outcomes.
+/// Result of a full `prune_pool` run: the slots successfully pruned, any
+/// per-slot deletion failures (path + error message), the slot preserved to
+/// keep the pool warm (if any available slot existed), and a failure to
+/// detach the preserved slot's branch (if that operation was attempted and
+/// failed). `git worktree prune` is always attempted regardless of
+/// per-slot/preserve outcomes.
 #[derive(Debug, Default)]
 pub struct PruneOutcome {
     pub pruned: Vec<PrunedSlot>,
     pub failures: Vec<(PathBuf, String)>,
+    /// The available slot kept (not deleted) to keep the pool warm, with the
+    /// branch it had checked out *before* being detached (or `None` if it was
+    /// already in detached HEAD and untouched). `None` only when there were
+    /// no available slots at all.
+    pub preserved: Option<PrunedSlot>,
+    /// Path + error message when detaching the preserved slot's branch
+    /// failed. The slot's directory is never deleted in this case.
+    pub preserve_failure: Option<(PathBuf, String)>,
 }
 
+/// A pool slot's path and its checked-out branch (or `None` for detached
+/// HEAD), as returned by [`prune_available_slots`].
+pub type PruneSlotCandidate = (PathBuf, Option<String>);
+
 /// Return every pool slot classified [`WorktreeStatus::Available`] for
-/// `pool_dir`, as `(path, branch)` pairs.
+/// `pool_dir`, as `(path, branch)` pairs, in the same pool order used by
+/// `bs list`/`bs status`.
 ///
 /// Reuses [`list_worktrees_status`] (the same classification `bs list`
 /// uses) rather than writing new porcelain-parsing logic, so `bs prune` and
 /// `bs list` can never disagree about which slots are available.
-pub fn prune_available_slots(pool_dir: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
+pub fn prune_available_slots(pool_dir: &Path) -> Result<Vec<PruneSlotCandidate>> {
     let entries = list_worktrees_status(pool_dir)?;
     Ok(entries
         .into_iter()
         .filter(|(_, status, _)| *status == WorktreeStatus::Available)
         .map(|(path, _, branch)| (path, branch))
         .collect())
+}
+
+/// Split a list of available slots (in pool order, as returned by
+/// [`prune_available_slots`]) into the slot to preserve and the slots to
+/// delete.
+///
+/// The first entry (if any) is preserved; every other entry is returned for
+/// deletion. Returns `(None, vec![])` for an empty input.
+pub fn select_prune_candidates(
+    available: Vec<PruneSlotCandidate>,
+) -> (Option<PruneSlotCandidate>, Vec<PruneSlotCandidate>) {
+    let mut iter = available.into_iter();
+    let preserved = iter.next();
+    let to_delete = iter.collect();
+    (preserved, to_delete)
 }
 
 /// Delete a single slot's on-disk directory via [`std::fs::remove_dir_all`].
@@ -1295,20 +1325,37 @@ pub fn git_worktree_prune() -> Result<()> {
     Ok(())
 }
 
-/// Prune every available slot in `pool_dir`: enumerate available slots,
-/// attempt to delete each directory (collecting successes and per-slot
+/// Prune available slots in `pool_dir`, always keeping the pool warm:
+/// enumerate available slots, preserve exactly one (the first in pool order,
+/// detaching its branch in place if it has one checked out), delete every
+/// other available slot's directory (collecting successes and per-slot
 /// failures without aborting the run), then always run `git worktree prune`
-/// once at the end regardless of per-slot outcomes.
+/// once at the end regardless of preserve/deletion outcomes.
 ///
-/// Returns a [`PruneOutcome`] the CLI layer uses to report pruned slots and
-/// any failures. Only propagates an error if `git_worktree_prune` itself
-/// fails to spawn/exits non-zero, or if enumerating slots fails; individual
-/// deletion failures are captured in `PruneOutcome::failures` instead.
+/// Returns a [`PruneOutcome`] the CLI layer uses to report the preserved
+/// slot, pruned slots, and any failures. Only propagates an error if
+/// `git_worktree_prune` itself fails to spawn/exits non-zero, or if
+/// enumerating slots fails; individual deletion/detach failures are
+/// captured in `PruneOutcome::failures`/`PruneOutcome::preserve_failure`
+/// instead.
 pub fn prune_pool(pool_dir: &Path) -> Result<PruneOutcome> {
     let candidates = prune_available_slots(pool_dir)?;
+    let (preserved, to_delete) = select_prune_candidates(candidates);
 
     let mut outcome = PruneOutcome::default();
-    for (path, branch) in candidates {
+
+    if let Some((path, branch)) = preserved {
+        match &branch {
+            Some(_) => match resolve_head().and_then(|head_sha| reset_slot(&path, &head_sha, None))
+            {
+                Ok(()) => outcome.preserved = Some(PrunedSlot { path, branch }),
+                Err(err) => outcome.preserve_failure = Some((path, format!("{err:#}"))),
+            },
+            None => outcome.preserved = Some(PrunedSlot { path, branch }),
+        }
+    }
+
+    for (path, branch) in to_delete {
         match delete_slot_dir(&path) {
             Ok(()) => outcome.pruned.push(PrunedSlot { path, branch }),
             Err(err) => outcome.failures.push((path, format!("{err:#}"))),
@@ -2199,5 +2246,35 @@ mod tests {
             0,
             "slot dir should remain empty when the entry list is empty"
         );
+    }
+
+    // -- select_prune_candidates ----------------------------------------------
+
+    #[test]
+    fn select_prune_candidates_empty_input_preserves_nothing() {
+        let (preserved, to_delete) = select_prune_candidates(vec![]);
+        assert_eq!(preserved, None);
+        assert!(to_delete.is_empty());
+    }
+
+    #[test]
+    fn select_prune_candidates_single_entry_is_preserved_not_deleted() {
+        let slot = (PathBuf::from("/tmp/slot-a"), Some("my-feature".to_string()));
+        let (preserved, to_delete) = select_prune_candidates(vec![slot.clone()]);
+        assert_eq!(preserved, Some(slot));
+        assert!(to_delete.is_empty());
+    }
+
+    #[test]
+    fn select_prune_candidates_multiple_entries_preserves_first_only() {
+        let first = (PathBuf::from("/tmp/slot-a"), None);
+        let second = (PathBuf::from("/tmp/slot-b"), Some("feature-b".to_string()));
+        let third = (PathBuf::from("/tmp/slot-c"), None);
+
+        let (preserved, to_delete) =
+            select_prune_candidates(vec![first.clone(), second.clone(), third.clone()]);
+
+        assert_eq!(preserved, Some(first));
+        assert_eq!(to_delete, vec![second, third]);
     }
 }
