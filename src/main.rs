@@ -587,7 +587,6 @@ fn run() -> anyhow::Result<()> {
 
             if outcome.pruned.is_empty()
                 && outcome.failures.is_empty()
-                && outcome.preserved.is_none()
                 && outcome.preserve_failure.is_none()
             {
                 println!("Nothing to prune (no available slots).");
@@ -600,14 +599,6 @@ fn run() -> anyhow::Result<()> {
                     "\u{1f5d1}\u{fe0f}  pruned {}",
                     format_current_path(&tilde, slot.branch.as_deref())
                 );
-            }
-
-            if let Some(preserved) = &outcome.preserved {
-                let tilde = worktree::tilde_path(&preserved.path);
-                match preserved.branch.as_deref() {
-                    Some(branch) => println!("kept {}  (detached {})", tilde, branch.bold()),
-                    None => println!("kept {}", tilde),
-                }
             }
 
             let mut failure_count = outcome.failures.len();

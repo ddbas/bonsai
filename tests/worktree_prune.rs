@@ -202,8 +202,12 @@ async fn prune_single_available_slot_is_preserved_not_deleted() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let available_tilde = bonsai::worktree::tilde_path(&available_slot);
     assert!(
-        stdout.contains("kept") && stdout.contains(&available_tilde),
-        "expected a 'kept' line for the preserved slot, got: {stdout:?}"
+        !stdout.contains("kept") && !stdout.contains(&available_tilde),
+        "expected no output identifying the preserved slot, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Nothing to prune"),
+        "expected the sole-preserve run to report 'nothing to prune', got: {stdout:?}"
     );
 }
 
@@ -249,15 +253,17 @@ async fn prune_preserved_slot_with_branch_is_detached() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let available_tilde = bonsai::worktree::tilde_path(&available_slot);
-    let kept_line = stdout
-        .lines()
-        .find(|l| l.contains(&available_tilde))
-        .unwrap_or_else(|| {
-            panic!("expected a 'kept' line for the preserved slot, got: {stdout:?}")
-        });
     assert!(
-        kept_line.contains("kept") && kept_line.contains("my-feature"),
-        "expected the kept line to mention the detached branch, got: {kept_line:?}"
+        !stdout.contains("kept") && !stdout.contains(&available_tilde),
+        "expected no output identifying the preserved slot, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("my-feature"),
+        "expected no mention of the detached branch, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Nothing to prune"),
+        "expected the sole-preserve run to report 'nothing to prune', got: {stdout:?}"
     );
 }
 
@@ -283,15 +289,13 @@ async fn prune_preserved_slot_already_detached_reports_no_branch() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let available_tilde = bonsai::worktree::tilde_path(&available_slot);
-    let kept_line = stdout
-        .lines()
-        .find(|l| l.contains(&available_tilde))
-        .unwrap_or_else(|| {
-            panic!("expected a 'kept' line for the preserved slot, got: {stdout:?}")
-        });
     assert!(
-        kept_line.contains("kept") && !kept_line.contains('('),
-        "expected the kept line to have no branch suffix, got: {kept_line:?}"
+        !stdout.contains("kept") && !stdout.contains(&available_tilde),
+        "expected no output identifying the preserved slot, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Nothing to prune"),
+        "expected the sole-preserve run to report 'nothing to prune', got: {stdout:?}"
     );
 }
 
@@ -299,7 +303,7 @@ async fn prune_preserved_slot_already_detached_reports_no_branch() {
 
 /// A deleted slot with a checked-out branch is reported with the branch
 /// name in parentheses; the preserved slot (whichever of the two is picked)
-/// is reported distinctly via a "kept" line.
+/// produces no output at all.
 #[tokio::test]
 async fn prune_reports_branch_or_no_branch_suffix() {
     let env = GitEnv::new().await;
@@ -340,7 +344,7 @@ async fn prune_reports_branch_or_no_branch_suffix() {
     let branch_tilde = bonsai::worktree::tilde_path(&branch_slot);
     let detached_tilde = bonsai::worktree::tilde_path(&detached_slot);
 
-    // Exactly one of the two slots is preserved ("kept"); the other is
+    // Exactly one of the two slots is preserved (silently); the other is
     // deleted ("pruned"). Which one is picked is an internal ordering
     // detail; only the reporting format is under test here.
     assert!(
@@ -348,35 +352,36 @@ async fn prune_reports_branch_or_no_branch_suffix() {
         "exactly one of the two available slots should remain"
     );
 
-    let branch_line = stdout
-        .lines()
-        .find(|l| l.contains(&branch_tilde))
-        .unwrap_or_else(|| panic!("expected a line for the branch slot, got: {stdout:?}"));
-    let detached_line = stdout
-        .lines()
-        .find(|l| l.contains(&detached_tilde))
-        .unwrap_or_else(|| panic!("expected a line for the detached slot, got: {stdout:?}"));
-
     if branch_slot.exists() {
         assert!(
-            branch_line.contains("kept") && branch_line.contains("my-feature"),
-            "expected the preserved branch slot's kept line to mention the \
-             detached branch, got: {branch_line:?}"
+            !stdout.contains(&branch_tilde),
+            "expected no output identifying the preserved branch slot, got: {stdout:?}"
         );
+        let detached_line = stdout
+            .lines()
+            .find(|l| l.contains(&detached_tilde))
+            .unwrap_or_else(|| {
+                panic!("expected a line for the deleted detached slot, got: {stdout:?}")
+            });
         assert!(
             detached_line.contains("pruned"),
             "expected the deleted detached slot to be reported as pruned, got: {detached_line:?}"
         );
     } else {
+        let branch_line = stdout
+            .lines()
+            .find(|l| l.contains(&branch_tilde))
+            .unwrap_or_else(|| {
+                panic!("expected a line for the deleted branch slot, got: {stdout:?}")
+            });
         assert!(
             branch_line.contains("pruned") && branch_line.contains("my-feature"),
             "expected the deleted branch slot's pruned line to mention its \
              branch, got: {branch_line:?}"
         );
         assert!(
-            detached_line.contains("kept") && !detached_line.contains('('),
-            "expected the preserved detached-HEAD slot's kept line to have no \
-             branch suffix, got: {detached_line:?}"
+            !stdout.contains(&detached_tilde),
+            "expected no output identifying the preserved detached-HEAD slot, got: {stdout:?}"
         );
     }
 }
