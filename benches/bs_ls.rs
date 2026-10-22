@@ -3,23 +3,21 @@
 //! `openspec/changes/add-bs-status-command/specs/worktree-list/spec.md`:
 //!
 //! `bs list` now classifies each slot via `classify_slot_status`, which
-//! short-circuits: a locked slot never invokes `git status`/`lsof`; a dirty
-//! unlocked slot never invokes `lsof`; only a clean, unlocked slot needs
-//! both. This benchmark measures `list_worktrees_status` (the
+//! short-circuits: a locked slot never invokes `git status` or branch-state
+//! checks; a dirty unlocked slot never invokes branch-state checks; only a
+//! clean, unlocked slot needs both. This benchmark measures `list_worktrees_status` (the
 //! `classify_slot_status`-based, thread-per-slot pool scan `bs list` calls)
 //! across pool sizes (1/5/10/25/50 slots) under three slot-mix scenarios:
 //!
-//! 1. **All locked** — the fastest path (no `git status`/`lsof` calls).
+//! 1. **All locked** — the fastest path (no `git status`/branch-state calls).
 //! 2. **All dirty, unlocked** — the middle path (`git status` only).
 //! 3. **All clean, unlocked, available** — the worst case (`git status` +
-//!    `lsof` for every slot); structurally identical in cost to the
-//!    pre-change per-slot fan-out this proposal's early return does not
-//!    eliminate for this scenario.
+//!    branch-state check for every slot); the floor this proposal's early
+//!    return does not eliminate for this scenario.
 //!
 //! A comparison-only baseline benchmark (`baseline_no_short_circuit`) also
-//! runs `is_clean` and `has_open_files` unconditionally for every slot
-//! (ignoring the early-return short circuit), reproducing the shape of the
-//! pre-change `list_worktrees_status` cost profile for reference; it is not
+//! runs `is_clean` and the branch-state check unconditionally for every slot
+//! (ignoring the early-return short circuit), for reference; it is not
 //! itself subject to any SLO.
 //!
 //! This benchmarks the in-process library calls that back `bs list`, not the
@@ -42,7 +40,7 @@ use bonsai::worktree;
 
 /// A throwaway git repository with `n` real worktree slots created under a
 /// `pool` subdirectory, suitable for benchmarking pool-scan functions that
-/// shell out to `git worktree list --porcelain` / `git status` / `lsof`.
+/// shell out to `git worktree list --porcelain` / `git status` / branch-state git calls.
 struct BenchRepo {
     _root: TempDir,
     repo_dir: PathBuf,
@@ -220,10 +218,8 @@ fn bench_classify_slot_status_all_available(c: &mut Criterion) {
 }
 
 /// Comparison-only baseline (not itself SLO-checked): runs both `is_clean`
-/// and `has_open_files` unconditionally for every slot, ignoring the
-/// early-return short circuit `classify_slot_status` uses. Reproduces the
-/// cost shape of the pre-change `list_worktrees_status` implementation
-/// (which always ran both `git status` and `lsof` per slot) for reference.
+/// and the branch-state check unconditionally for every slot, ignoring the
+/// early-return short circuit `classify_slot_status` uses, for reference.
 fn bench_baseline_no_short_circuit(c: &mut Criterion) {
     let mut group = c.benchmark_group("baseline_no_short_circuit");
     group.sample_size(20);
@@ -236,12 +232,18 @@ fn bench_baseline_no_short_circuit(c: &mut Criterion) {
         group.bench_function(format!("{n}_slots"), |b| {
             b.iter(|| {
                 let entries = worktree::list_pool_worktrees(&repo.pool_dir).unwrap();
+                let default_ref = worktree::branch_state::resolve_default_ref(Path::new("."));
                 let handles: Vec<_> = entries
                     .into_iter()
                     .map(|entry| {
+                        let default_ref = default_ref.clone();
                         std::thread::spawn(move || {
                             let _dirty = !worktree::is_clean(&entry.path).unwrap();
-                            let _has_processes = worktree::has_open_files(&entry.path).unwrap();
+                            let _state = worktree::branch_state::branch_state(
+                                &entry.path,
+                                entry.branch.as_deref(),
+                                &default_ref,
+                            );
                         })
                     })
                     .collect();

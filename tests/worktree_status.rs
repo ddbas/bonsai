@@ -176,7 +176,7 @@ async fn status_nonexistent_path_errors() {
 
 // ── classification priority: locked > in use > available ────────────────────
 
-/// A clean, unlocked slot with no open processes is classified `available`.
+/// A clean, unlocked slot is classified `available`.
 #[tokio::test]
 async fn status_clean_unlocked_slot_is_available() {
     let env = GitEnv::new().await;
@@ -352,71 +352,98 @@ async fn status_clean_slot_has_no_file_sections() {
     );
 }
 
-// ── itemized process list ────────────────────────────────────────────────────
+// ── branch state ─────────────────────────────────────────────────────────────
 
-/// A process with an open file descriptor directly at the slot root is
-/// listed with its PID and command name, not merely a count.
+/// An unpushed branch with commits is `in use` and the report explains why.
 #[tokio::test]
-async fn status_lists_individual_open_process() {
+async fn status_reports_unpushed_commits_branch_state() {
+    let env = GitEnv::new().await;
+    env.add_origin().await;
+    env.git(&["checkout", "-q", "-b", "feat"]).await;
+    env.make_commit("a.txt", "a").await;
+    env.make_commit("b.txt", "b").await;
+    env.make_commit("c.txt", "c").await;
+    env.git(&["checkout", "-q", "main"]).await;
+    let slot = env.run_get_branch("feat");
+
+    let out = env
+        .bs()
+        .args(["status", slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs status");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("in use"), "got: {stdout:?}");
+    assert!(
+        stdout.contains("3 commits ahead of origin/main"),
+        "got: {stdout:?}"
+    );
+    assert!(stdout.contains("no upstream configured"), "got: {stdout:?}");
+    assert!(stdout.contains("-u"), "got: {stdout:?}");
+}
+
+/// A squash-merged branch whose remote branch is gone is `available`.
+#[tokio::test]
+async fn status_reports_merged_remote_gone() {
+    let env = GitEnv::new().await;
+    env.add_origin().await;
+    env.git(&["checkout", "-q", "-b", "feat"]).await;
+    env.make_commit("f.txt", "f").await;
+    env.git(&["push", "-u", "origin", "feat"]).await;
+    env.git(&["checkout", "-q", "main"]).await;
+    env.git(&["merge", "--squash", "feat"]).await;
+    env.git(&["commit", "-q", "-m", "squash"]).await;
+    env.git(&["push", "origin", "main"]).await;
+    env.git(&["push", "origin", "--delete", "feat"]).await;
+    env.fix_permissions().await;
+    let slot = env.run_get_branch("feat");
+
+    let out = env
+        .bs()
+        .args(["status", slot.to_str().unwrap()])
+        .output()
+        .expect("spawn bs status");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("available"), "got: {stdout:?}");
+    assert!(stdout.contains("remote branch is gone"), "got: {stdout:?}");
+}
+
+/// A file inside a new untracked directory makes the slot `in use`.
+#[tokio::test]
+async fn status_untracked_file_in_new_directory_is_in_use() {
     let env = GitEnv::new().await;
     let slot = env.run_get();
+    std::fs::create_dir_all(slot.join("newdir/sub")).unwrap();
+    std::fs::write(slot.join("newdir/sub/f.txt"), "x").unwrap();
+    assert_eq!(env.status_word(&slot), "in use");
+    let out = env
+        .bs()
+        .args(["status", slot.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("newdir/sub/f.txt"), "got: {stdout:?}");
+}
 
-    // Hold a file open directly in the slot root for the duration of the
-    // `bs status` call below; `lsof -w +d <slot>` should detect this test
-    // process's PID.
+/// Open processes no longer affect classification, and `bs status` does not
+/// list them.
+#[tokio::test]
+async fn status_ignores_open_process() {
+    let env = GitEnv::new().await;
+    let slot = env.run_get();
     let file_path = slot.join("held_open.txt");
     std::fs::write(&file_path, b"data").expect("write");
     let _handle = std::fs::File::open(&file_path).expect("open file");
+    // `held_open.txt` itself is untracked; remove it so only the open handle
+    // (which stays valid after unlink) remains.
+    std::fs::remove_file(&file_path).expect("unlink");
 
     let out = env
         .bs()
         .args(["status", slot.to_str().unwrap()])
         .output()
         .expect("spawn bs status");
-    assert!(
-        out.status.success(),
-        "bs status should exit 0\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-
-    assert!(
-        stdout.contains("open processes"),
-        "expected an 'open processes' section, got: {stdout:?}"
-    );
-    let this_pid = std::process::id().to_string();
-    assert!(
-        stdout.contains(&this_pid),
-        "expected this test process's PID '{this_pid}' listed, got: {stdout:?}"
-    );
-    assert!(stdout.contains("in use"), "got: {stdout:?}");
-}
-
-// ── lsof unavailability is a hard error ──────────────────────────────────────
-
-/// When `lsof` cannot be found, `bs status` exits non-zero naming `lsof` as
-/// the missing dependency.
-#[tokio::test]
-async fn status_fails_with_actionable_error_when_lsof_missing() {
-    let env = GitEnv::new().await;
-    let slot = env.run_get();
-
-    let git_only_path = common::git_only_path_dir();
-
-    let out = env
-        .bs()
-        .args(["status", slot.to_str().unwrap()])
-        .env("PATH", git_only_path.path())
-        .output()
-        .expect("spawn bs status");
-
-    assert!(
-        !out.status.success(),
-        "bs status should exit non-zero when lsof is missing"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("lsof"),
-        "stderr should name 'lsof' as the missing dependency, got: {stderr:?}"
-    );
+    assert!(stdout.contains("available"), "got: {stdout:?}");
+    assert!(!stdout.contains("open processes"), "got: {stdout:?}");
 }

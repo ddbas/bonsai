@@ -83,9 +83,9 @@ enum Commands {
     /// parentheses. The current slot is marked with a `▶` prefix (no other
     /// worktrees are so marked). Per-slot
     /// checks short-circuit as soon as the badge's classification is known:
-    /// a locked slot never triggers `git status`/`lsof`; a dirty unlocked
-    /// slot never triggers `lsof`. No per-file or per-process detail (counts
-    /// or itemized lists) is computed or displayed here — use
+    /// a locked slot never triggers `git status` or branch-state checks; a
+    /// dirty unlocked slot never triggers branch-state checks. No per-file
+    /// detail (counts or itemized lists) is computed or displayed here — use
     /// `bs status [PATH]` for that.
     #[command(alias = "ls")]
     List,
@@ -96,8 +96,8 @@ enum Commands {
     /// `locked`, using the same priority rules `bs list`'s status badge
     /// applies), plus itemized detail: the lock reason (if locked), the
     /// individual `git status --porcelain` lines (uncommitted and untracked),
-    /// and the PID + command name of each process with an open file handle
-    /// directly at the slot root.
+    /// and a branch-state line explaining whether the slot's branch carries
+    /// unmerged work.
     ///
     /// `PATH` is optional; when omitted, `bs status` resolves the slot
     /// containing the current working directory (same resolution as
@@ -172,8 +172,8 @@ fn format_current_path(tilde: &str, branch: Option<&str>) -> String {
 
 /// Render a [`worktree::SlotStatusReport`] to stdout in the plain-text,
 /// itemized format described by `bs status`'s spec: a header line with the
-/// path/branch, a classification line (with lock reason when locked), and
-/// itemized sections for open processes, uncommitted files, and untracked
+/// path/branch, a classification line (with lock reason when locked), a
+/// branch-state line, and itemized sections for uncommitted and untracked
 /// files (omitted when empty).
 fn print_status_report(report: &worktree::SlotStatusReport) {
     let tilde = worktree::tilde_path(&report.path);
@@ -194,12 +194,8 @@ fn print_status_report(report: &worktree::SlotStatusReport) {
         worktree::WorktreeStatus::Available => println!("status: {}", "available".green()),
     }
 
-    if !report.processes.is_empty() {
-        println!();
-        println!("open processes:");
-        for process in &report.processes {
-            println!("  {}  {}", process.pid, process.command);
-        }
+    if let Some(reason) = &report.branch_state {
+        println!("branch state: {reason}");
     }
 
     if !report.git_status.uncommitted.is_empty() {

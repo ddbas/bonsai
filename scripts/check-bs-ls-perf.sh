@@ -8,10 +8,10 @@
 #   1. All-locked / all-dirty scenarios (no or partial subprocess fan-out):
 #      p95 @ 50 slots <= 100ms; scaling ratio p95@50/p95@5 <= 6.0x.
 #   2. All-available scenario (full subprocess fan-out — one `git status` +
-#      one `lsof` per slot): tracked and reported, but not gated on a fixed
+#      one branch-state check per slot): tracked and reported, but not gated on a fixed
 #      absolute bound; only checked against a generous scaling-regression
 #      bound so an unexpected additional cost beyond the inherent
-#      `lsof`/`git status` floor is still caught.
+#      `git status` + branch-state floor is still caught.
 #
 # Usage: scripts/check-bs-ls-perf.sh
 set -euo pipefail
@@ -22,7 +22,7 @@ cd "$REPO_ROOT"
 P95_MAX_MS=100
 SCALING_MAX_RATIO=6.0
 # Generous scaling-regression bound for the all-available scenario: its cost
-# is dominated by one `git status` + one `lsof` subprocess spawn per slot,
+# is dominated by one `git status` + one branch-state check per slot,
 # which scales close to linearly with pool size by construction. This bound
 # exists only to catch a regression *beyond* that expected linear-ish growth,
 # not to demand sub-linear scaling that isn't achievable here.
