@@ -108,7 +108,10 @@ check_available_scenario() {
 }
 
 check_gated_scenario "classify_slot_status_all_locked" "All-locked scenario"
-check_gated_scenario "classify_slot_status_all_dirty" "All-dirty scenario"
+# All-dirty now runs one `git status` per slot (no lsof short-circuit), so it
+# scales near-linearly like all-available: keep the absolute p95 bound but
+# gate scaling with the generous regression bound instead of 6.0x.
+SCALING_MAX_RATIO=$AVAILABLE_SCALING_MAX_RATIO check_gated_scenario "classify_slot_status_all_dirty" "All-dirty scenario"
 check_available_scenario "classify_slot_status_all_available" "All-available scenario"
 
 echo ""
