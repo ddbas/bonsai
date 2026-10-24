@@ -277,10 +277,27 @@ impl GitEnv {
         path_from_output(&out.stdout)
     }
 
+    /// Run `bs get <branch>` (existing branch), assert success, and return
+    /// the slot path.
+    pub fn run_get_branch(&self, branch: &str) -> PathBuf {
+        let out = self
+            .bs()
+            .args(["get", branch])
+            .output()
+            .expect("spawn bs get <branch>");
+        assert!(
+            out.status.success(),
+            "bs get {branch} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        path_from_output(&out.stdout)
+    }
+
     /// Make `/workspace` world-accessible so the host runner user (non-root
     /// on Linux CI) can write into directories created by root inside the
     /// container (e.g. `.git/worktrees/`).
-    async fn fix_permissions(&self) {
+    pub async fn fix_permissions(&self) {
         let chmod = ExecCommand::new(vec![
             "chmod".to_string(),
             "-R".to_string(),
@@ -309,6 +326,49 @@ impl GitEnv {
         // Re-apply world-writable permissions after each commit so the host
         // runner user can access newly created .git objects and refs.
         self.fix_permissions().await;
+    }
+
+    /// Rename the current branch to `main` and give the repository a bare
+    /// `origin` (at `/workspace/origin.git`, inside the bind mount) with
+    /// `main` pushed and `origin/HEAD` set, so branch-state tests exercise
+    /// the remote-tracking default ref.
+    pub async fn add_origin(&self) {
+        self.git(&["branch", "-M", "main"]).await;
+        // Keep `git add .` in later helpers from sweeping the bare repo in.
+        std::fs::create_dir_all(self.repo_path.join(".git/info")).expect("mkdir .git/info");
+        std::fs::write(self.repo_path.join(".git/info/exclude"), "origin.git/\n")
+            .expect("write info/exclude");
+        self.git(&["init", "--bare", "-q", "origin.git"]).await;
+        self.git(&["remote", "add", "origin", "/workspace/origin.git"])
+            .await;
+        self.git(&["push", "-u", "origin", "main"]).await;
+        self.git(&["remote", "set-head", "origin", "main"]).await;
+        self.fix_permissions().await;
+    }
+
+    /// Classification word (`available`/`in use`/`locked`) `bs status`
+    /// reports for `slot`.
+    pub fn status_word(&self, slot: &Path) -> String {
+        let out = self
+            .bs()
+            .args(["status", slot.to_str().unwrap()])
+            .output()
+            .expect("spawn bs status");
+        assert!(
+            out.status.success(),
+            "bs status failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let line = stdout
+            .lines()
+            .find(|l| l.starts_with("status:"))
+            .unwrap_or_else(|| panic!("no status line in {stdout:?}"));
+        ["available", "in use", "locked"]
+            .into_iter()
+            .find(|w| line.contains(w))
+            .unwrap_or_else(|| panic!("unrecognized status line {line:?}"))
+            .to_string()
     }
 
     /// The single repo-slug directory created under `bonsai_path` after the
@@ -401,11 +461,9 @@ pub fn host_git(dir: &Path, args: &[&str]) -> std::process::Output {
 }
 
 /// Build a `PATH`-suitable directory that exposes only `git` (via a symlink
-/// to the host's real `git` binary) and no `lsof`.
+/// to the host's real `git` binary) and nothing else.
 ///
-/// Used to assert that a command does not shell out to `lsof`: run the
-/// command with this directory as its entire `PATH`; if it still needs
-/// `lsof`, spawning will fail with a "not found" error.
+/// Used to assert that a command needs no external tool besides `git`.
 pub fn git_only_path_dir() -> TempDir {
     let real_git = {
         let out = Command::new("which")

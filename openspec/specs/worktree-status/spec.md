@@ -86,37 +86,6 @@ when applicable, the checked-out branch name (omitted for detached HEAD).
 - **THEN** the report SHALL include the tilde-abbreviated path with no branch
   annotation
 
-### Requirement: Report includes an overall classification using the same priority rules `bs list` used
-
-The report SHALL classify the slot as one of `locked`, `in use`, or `available`,
-using the same priority order `bs list`'s status badge uses — both are computed
-by one shared classification function so the two commands cannot disagree on a
-given slot:
-
-1. **`locked`** — if the slot is git-locked, regardless of other signals.
-2. **`in use`** — if the slot is not locked but has uncommitted changes,
-   untracked files, or at least one process with an open file descriptor
-   directly in the slot root.
-3. **`available`** — if the slot is not locked, its working tree is clean, and
-   no process has an open handle directly at the slot root.
-
-#### Scenario: Locked slot classified as locked regardless of dirty state
-
-- **WHEN** the resolved slot is git-locked and also has uncommitted changes and
-  open processes
-- **THEN** the report SHALL classify the slot as `locked`
-
-#### Scenario: Dirty unlocked slot classified as in use
-
-- **WHEN** the resolved slot is unlocked and has uncommitted changes
-- **THEN** the report SHALL classify the slot as `in use`
-
-#### Scenario: Clean idle unlocked slot classified as available
-
-- **WHEN** the resolved slot is unlocked, clean, and has no open processes at
-  its root
-- **THEN** the report SHALL classify the slot as `available`
-
 ### Requirement: Report includes the lock reason when the slot is locked
 
 When the slot is git-locked, the report SHALL include the lock's `--reason` text
@@ -132,31 +101,6 @@ if one was set, or indicate that no reason was given.
 
 - **WHEN** the resolved slot is git-locked without a `--reason` argument
 - **THEN** the report SHALL indicate the slot is locked without a reason string
-
-### Requirement: Report lists individual open processes with PID and command name
-
-The report SHALL list each distinct process with an open file descriptor
-directly in the slot root (non-recursive, same detection as
-`count_open_processes`), showing its PID and command name — not merely a count.
-
-#### Scenario: Two distinct processes have handles open
-
-- **WHEN** `lsof -w +d <slot>` reports two distinct PIDs with open handles
-  directly in the slot root
-- **THEN** the report SHALL list both processes, each with its PID and command
-  name
-
-#### Scenario: No processes have handles open
-
-- **WHEN** no process has an open file descriptor directly in the slot root
-- **THEN** the report SHALL indicate there are no open processes (e.g. by
-  omitting the section or stating none)
-
-#### Scenario: Process has handles only in a subdirectory
-
-- **WHEN** a process has an open file descriptor only in a subdirectory of the
-  slot (e.g. `<slot>/src/main.rs`) and not at the slot root itself
-- **THEN** that process SHALL NOT appear in the report's process list
 
 ### Requirement: Report lists individual uncommitted and untracked files
 
@@ -177,16 +121,65 @@ slot, split into uncommitted (modified/staged, non-`??` XY code) and untracked
 - **THEN** the report SHALL indicate there are no uncommitted or untracked files
   (e.g. by omitting the sections or stating none)
 
-### Requirement: lsof unavailability is a hard error
+### Requirement: Report classification uses lock, dirty, and branch state with the same priority as `bs list`
 
-`bs status` SHALL exit with a non-zero status and an actionable error message
-naming `lsof` as the missing dependency when `lsof` cannot be spawned, rather
-than silently omitting process information, consistent with existing
-`has_open_files`/`count_open_processes` behavior.
+The report SHALL classify the slot as one of `locked`, `in use`, or `available`,
+using the same priority order `bs list`'s status badge uses - both are computed
+by one shared classification function so the two commands cannot disagree on a
+given slot:
 
-#### Scenario: `lsof` not on PATH
+1. **`locked`** - if the slot is git-locked, regardless of other signals.
+2. **`in use`** - if the slot is not locked but has uncommitted changes,
+   untracked files, or a branch state carrying unmerged work (see
+   `worktree-branch-state`).
+3. **`available`** - if the slot is not locked, its working tree is clean, and
+   its branch carries no unmerged work.
 
-- **WHEN** `lsof` is not present on `PATH`
-- **THEN** `bs status` SHALL exit with a non-zero status
-- **THEN** stderr SHALL contain a message naming `lsof` as the missing
-  dependency
+Open processes SHALL NOT affect the classification.
+
+#### Scenario: Locked slot classified as locked regardless of dirty state
+
+- **WHEN** the resolved slot is git-locked and also has uncommitted changes and
+  unmerged commits
+- **THEN** the report SHALL classify the slot as `locked`
+
+#### Scenario: Dirty unlocked slot classified as in use
+
+- **WHEN** the resolved slot is unlocked and has uncommitted changes
+- **THEN** the report SHALL classify the slot as `in use`
+
+#### Scenario: Clean slot with unmerged work classified as in use
+
+- **WHEN** the resolved slot is unlocked and clean but its branch has commits
+  not on the default ref and not proven merged
+- **THEN** the report SHALL classify the slot as `in use`
+
+#### Scenario: Clean slot with no unmerged work classified as available
+
+- **WHEN** the resolved slot is unlocked, clean, and its branch carries no
+  unmerged work
+- **THEN** the report SHALL classify the slot as `available`
+
+### Requirement: Report includes a branch-state line explaining the classification
+
+The report SHALL include a "Branch state" line stating why the branch is or is
+not considered to carry unmerged work, using the reason defined in
+`worktree-branch-state` (e.g. "3 commits ahead of origin/main, no upstream
+configured", "remote branch still exists", "default branch could not be
+determined", "no commits of its own"). When the reason is that commits were
+never pushed with upstream tracking, the line SHALL hint that pushing with `-u`
+enables merged-branch detection.
+
+#### Scenario: Unmerged commits, never pushed
+
+- **WHEN** the resolved slot's branch has 3 commits not on `origin/main` and no
+  upstream config
+- **THEN** the report SHALL show a branch-state line stating 3 commits ahead of
+  `origin/main` and that no upstream is configured
+
+#### Scenario: Merged and remote gone
+
+- **WHEN** the resolved slot's branch was squash-merged and its remote branch is
+  gone
+- **THEN** the report SHALL show a branch-state line stating the branch is
+  merged and its remote branch is gone

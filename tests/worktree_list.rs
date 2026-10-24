@@ -310,25 +310,25 @@ async fn list_path_column_aligned_with_current_slot_prefix() {
     );
 }
 
-// ── early-return short-circuit: lsof is skipped for locked/dirty slots ──────
+// ── no external tools beyond git ───────────────────────────────────────────
 
-/// `bs list` must not invoke `lsof` for a **locked** slot: with a `PATH` that
-/// only exposes `git` (no `lsof` binary reachable), `bs list` must still
-/// succeed and report `locked` for a locked slot.
+/// `bs list` needs only `git`: with a `PATH` that exposes nothing else it must
+/// succeed for locked, dirty and clean slots.
 #[tokio::test]
-async fn list_locked_slot_skips_lsof() {
+async fn list_needs_only_git() {
     let env = GitEnv::new().await;
-    let slot = env.run_get();
-
+    let locked = env.run_get();
     let lock_out = env
         .bs()
-        .args(["lock", slot.to_str().unwrap()])
+        .args(["lock", locked.to_str().unwrap()])
         .output()
         .expect("spawn bs lock");
     assert!(lock_out.status.success());
+    let dirty = env.run_get();
+    std::fs::write(dirty.join("dirty.txt"), "dirty").expect("write dirty file");
+    let _clean = env.run_get();
 
     let git_only_path = common::git_only_path_dir();
-
     let out = env
         .bs()
         .arg("list")
@@ -338,72 +338,25 @@ async fn list_locked_slot_skips_lsof() {
 
     assert!(
         out.status.success(),
-        "bs list must succeed for a locked slot without lsof on PATH\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
+        "bs list must succeed with only git on PATH\nstderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("locked"),
-        "expected the locked badge without needing lsof, got: {stdout:?}"
-    );
+    assert!(stdout.contains("locked"), "got: {stdout:?}");
+    assert!(stdout.contains("in use"), "got: {stdout:?}");
+    assert!(stdout.contains("available"), "got: {stdout:?}");
 }
 
-/// `bs list` must not invoke `lsof` for a **dirty, unlocked** slot: with a
-/// `PATH` that only exposes `git`, `bs list` must still succeed and report
-/// `in use` for a dirty slot.
+/// A clean slot whose branch has unmerged commits is `in use` in `bs list`.
 #[tokio::test]
-async fn list_dirty_slot_skips_lsof() {
+async fn list_clean_slot_with_unmerged_commits_is_in_use() {
     let env = GitEnv::new().await;
-    let slot = env.run_get();
-    std::fs::write(slot.join("dirty.txt"), "dirty").expect("write dirty file");
+    env.git(&["checkout", "-q", "-b", "feat"]).await;
+    env.make_commit("f.txt", "f").await;
+    env.git(&["checkout", "-q", "-"]).await;
+    let _slot = env.run_get_branch("feat");
 
-    let git_only_path = common::git_only_path_dir();
-
-    let out = env
-        .bs()
-        .arg("list")
-        .env("PATH", git_only_path.path())
-        .output()
-        .expect("spawn bs list");
-
-    assert!(
-        out.status.success(),
-        "bs list must succeed for a dirty slot without lsof on PATH\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = env.bs().arg("list").output().expect("spawn bs list");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("in use"),
-        "expected the in-use badge without needing lsof, got: {stdout:?}"
-    );
-}
-
-/// A clean, unlocked slot DOES require `lsof` to distinguish `available` from
-/// `in use`: with a `PATH` that only exposes `git`, `bs list` must fail
-/// naming `lsof` as the missing dependency.
-#[tokio::test]
-async fn list_clean_unlocked_slot_requires_lsof() {
-    let env = GitEnv::new().await;
-    let _slot = env.run_get();
-
-    let git_only_path = common::git_only_path_dir();
-
-    let out = env
-        .bs()
-        .arg("list")
-        .env("PATH", git_only_path.path())
-        .output()
-        .expect("spawn bs list");
-
-    assert!(
-        !out.status.success(),
-        "bs list must fail for a clean, unlocked slot without lsof on PATH"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("lsof"),
-        "stderr should name 'lsof' as the missing dependency, got: {stderr:?}"
-    );
+    assert!(stdout.contains("in use"), "got: {stdout:?}");
 }

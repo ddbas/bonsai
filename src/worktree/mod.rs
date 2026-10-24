@@ -10,12 +10,14 @@
 //! All slots use detached HEAD; branch management is the caller's
 //! responsibility.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
+
+pub mod branch_state;
+use branch_state::{LazyDefaultRef, branch_state as compute_branch_state, resolve_default_ref};
 
 // -- Internal helpers ---------------------------------------------------------
 
@@ -73,17 +75,6 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
 }
 
-/// A single distinct process with an open file descriptor directly in a
-/// slot's root (non-recursive), as reported by `lsof -w +d <path>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessHandle {
-    /// Process ID, as reported by `lsof` (kept as a string; not parsed to a
-    /// numeric type since it is only ever displayed, never computed with).
-    pub pid: String,
-    /// Command name (`lsof`'s `COMMAND` column).
-    pub command: String,
-}
-
 /// A single classified line from `git status --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusLine {
@@ -103,7 +94,7 @@ pub struct GitStatusDetail {
 }
 
 /// Detailed status report for a single managed pool worktree slot, combining
-/// lock state (+ reason), git-status detail, and open-process detail.
+/// lock state (+ reason), git-status detail, and branch state.
 ///
 /// Built by [`slot_status`]; rendered by the `bs status` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,9 +108,9 @@ pub struct SlotStatusReport {
     /// The lock's `--reason` text, when the slot is locked and a reason was
     /// given.
     pub lock_reason: Option<String>,
-    /// Distinct processes with an open file descriptor directly in the slot
-    /// root.
-    pub processes: Vec<ProcessHandle>,
+    /// Human-readable branch-state reason (`None` for locked slots, where
+    /// branch state is not evaluated).
+    pub branch_state: Option<String>,
     /// Itemized uncommitted/untracked `git status --porcelain` lines.
     pub git_status: GitStatusDetail,
 }
@@ -131,9 +122,10 @@ pub type WorktreeListEntry = (PathBuf, WorktreeStatus, Option<String>);
 /// Availability status of a pool worktree slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeStatus {
-    /// Slot exists on disk, is not locked, and its working tree is clean.
+    /// Slot exists on disk, is not locked, its working tree is clean, and its
+    /// branch carries no unmerged work.
     Available,
-    /// Slot has uncommitted changes, untracked files, or open process handles,
+    /// Slot has uncommitted changes, untracked files, or unmerged branch work,
     /// and is not git-locked.
     InUse,
     /// Slot is git-locked (via `git worktree lock`); takes priority over `InUse`.
@@ -536,7 +528,13 @@ pub fn list_pool_worktrees(pool_dir: &Path) -> Result<Vec<WorktreeEntry>> {
 /// subprocess invocation is not duplicated.
 fn run_git_status_porcelain(slot_path: &Path) -> Result<String> {
     let output = git_cmd()
-        .args(["-C", &slot_path.to_string_lossy(), "status", "--porcelain"])
+        .args([
+            "-C",
+            &slot_path.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
         .output()
         .context("failed to spawn `git status --porcelain`")?;
 
@@ -584,72 +582,68 @@ pub fn git_status_lines(slot_path: &Path) -> Result<GitStatusDetail> {
     Ok(detail)
 }
 
-/// Classify a slot given its lock state, dirty state, and open-process
-/// state.
+/// Classify a slot given its lock state, dirty state, and whether its branch
+/// carries unmerged work.
 ///
-/// Priority: `Locked` > `InUse` (dirty or open processes) > `Available`. This
-/// is the single place the priority rule is encoded; both
-/// [`classify_slot_status`] (used by `bs list`, fed early-return booleans)
-/// and [`slot_status`] (used by `bs status`, fed booleans derived from the
-/// full detail it already collects) call this function so the two commands
+/// Priority: `Locked` > `InUse` (dirty or unmerged work) > `Available`. This
+/// is the single place the priority rule is encoded; [`classify_slot_status`]
+/// (`bs list`/`bs prune`), [`slot_status`] (`bs status`) and
+/// [`find_available_slot`] (`bs get`) all route through it so the commands
 /// can never disagree on a given slot's classification.
-pub fn classify(locked: bool, dirty: bool, has_processes: bool) -> WorktreeStatus {
+pub fn classify(locked: bool, dirty: bool, has_unmerged_work: bool) -> WorktreeStatus {
     if locked {
         WorktreeStatus::Locked
-    } else if dirty || has_processes {
+    } else if dirty || has_unmerged_work {
         WorktreeStatus::InUse
     } else {
         WorktreeStatus::Available
     }
 }
 
-/// Classify a single pool slot for `bs list`, short-circuiting as soon as the
+/// Classify a single pool slot, short-circuiting as soon as the
 /// classification is known so cheaper signals are checked first:
 ///
-/// 1. `entry.locked` (already known for free from the
-///    `git worktree list --porcelain` parse) → `Locked` immediately, no
-///    `git status`/`lsof` call at all.
-/// 2. [`is_clean`] → `InUse` immediately if dirty, **no `lsof` call**.
-/// 3. [`has_open_files`] → determines the final `InUse`/`Available` split.
-pub fn classify_slot_status(entry: &WorktreeEntry) -> Result<WorktreeStatus> {
+/// 1. `entry.locked` (free from the `git worktree list --porcelain` parse) →
+///    `Locked`, no git call at all.
+/// 2. [`is_clean`] → `InUse` if dirty, no branch-state call.
+/// 3. [`compute_branch_state`] → final `InUse`/`Available` split.
+pub fn classify_slot_status(
+    entry: &WorktreeEntry,
+    default_ref: &LazyDefaultRef,
+) -> Result<WorktreeStatus> {
     if entry.locked {
         return Ok(classify(true, false, false));
     }
     if !is_clean(&entry.path)? {
         return Ok(classify(false, true, false));
     }
-    let has_processes = has_open_files(&entry.path)?;
-    Ok(classify(false, false, has_processes))
+    let state = compute_branch_state(&entry.path, entry.branch.as_deref(), default_ref.get());
+    Ok(classify(false, false, !state.is_available()))
 }
 
 /// Return the availability status of every pool worktree slot.
 ///
-/// Each slot's status is computed via [`classify_slot_status`], which
-/// short-circuits per slot: a locked slot never triggers `git status`/`lsof`;
-/// a dirty unlocked slot never triggers `lsof`.
-///
-/// Per-slot checks are executed concurrently (one thread per slot); the
-/// returned `Vec` preserves the original slot ordering from
-/// `git worktree list --porcelain`.
+/// Each slot's status is computed via [`classify_slot_status`]; the default
+/// ref is resolved once and shared. Per-slot checks run concurrently (one
+/// thread per slot); the returned `Vec` preserves the original slot ordering
+/// from `git worktree list --porcelain`.
 ///
 /// The returned tuple is `(path, status, branch)` where `branch` is the short
 /// checked-out branch name (`None` for detached HEAD).
 pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> {
     let entries = list_pool_worktrees(pool_dir)?;
+    let default_ref = std::sync::Arc::new(LazyDefaultRef::new(Path::new(".")));
 
-    // Spawn one thread per slot so that any blocking `git status`/`lsof`
-    // calls run concurrently.  Handles are collected into a `Vec` and joined
-    // in original slot order, guaranteeing that the returned `Vec` ordering
-    // matches `git worktree list` regardless of which thread finishes first.
     let handles: Vec<std::thread::JoinHandle<Result<WorktreeListEntry>>> = entries
         .into_iter()
         .map(|entry| {
+            let default_ref = std::sync::Arc::clone(&default_ref);
             std::thread::spawn(move || -> Result<WorktreeListEntry> {
                 let branch = entry.branch.clone();
                 let status = if !entry.path.exists() {
                     WorktreeStatus::InUse
                 } else {
-                    classify_slot_status(&entry)?
+                    classify_slot_status(&entry, &default_ref)?
                 };
                 Ok((entry.path, status, branch))
             })
@@ -668,17 +662,10 @@ pub fn list_worktrees_status(pool_dir: &Path) -> Result<Vec<WorktreeListEntry>> 
 
 /// Compute a detailed status report for a single managed pool worktree slot.
 ///
-/// `path` must already be a canonicalizable, registered git worktree (callers
-/// resolve/validate the slot first via [`current_worktree`] or
-/// [`validate_pool_slot`]). Combines:
-/// - lock state + reason, from `git worktree list --porcelain` (reusing
-///   [`list_pool_worktrees_checking_stale`], scoped to just this one slot by
-///   passing the slot's own canonical path as the "pool" filter),
-/// - itemized `git status --porcelain` lines, via [`git_status_lines`],
-/// - itemized open-process detail, via [`list_open_processes`],
-///
-/// and derives the overall [`WorktreeStatus`] classification using the same
-/// priority rules `bs list` used to apply: `Locked` > `InUse` > `Available`.
+/// `path` must already be a canonicalizable, registered git worktree. Combines
+/// lock state + reason, itemized `git status --porcelain` lines, and the
+/// branch-state reason, and derives the overall [`WorktreeStatus`] with
+/// [`classify`].
 pub fn slot_status(path: &Path) -> Result<SlotStatusReport> {
     let canonical = path
         .canonicalize()
@@ -695,148 +682,39 @@ pub fn slot_status(path: &Path) -> Result<SlotStatusReport> {
             anyhow::anyhow!("{} is not a registered git worktree", canonical.display())
         })?;
 
-    let processes = list_open_processes(&canonical)?;
     let git_status = git_status_lines(&canonical)?;
-
     let dirty = !git_status.uncommitted.is_empty() || !git_status.untracked.is_empty();
-    let has_processes = !processes.is_empty();
-    let status = classify(entry.locked, dirty, has_processes);
+
+    let (has_unmerged_work, branch_state) = if entry.locked {
+        (false, None)
+    } else {
+        let default_ref = resolve_default_ref(&canonical);
+        let state = compute_branch_state(&canonical, entry.branch.as_deref(), &default_ref);
+        (!state.is_available(), Some(state.reason(&default_ref)))
+    };
+    let status = classify(entry.locked, dirty, has_unmerged_work);
 
     Ok(SlotStatusReport {
         path: canonical,
         branch: entry.branch,
         status,
         lock_reason: entry.lock_reason,
-        processes,
+        branch_state,
         git_status,
     })
-}
-
-/// Parse `(pid, command)` pairs from `lsof +d` stdout, deduplicated by PID
-/// (first occurrence wins), preserving first-seen order.
-///
-/// Skips the header line (starts with `COMMAND`). The command name is the
-/// first whitespace-delimited field; the PID is the second.
-fn parse_lsof_processes(stdout: &str) -> Vec<ProcessHandle> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut result = Vec::new();
-    for line in stdout.lines() {
-        if line.starts_with("COMMAND") {
-            continue;
-        }
-        let mut fields = line.split_whitespace();
-        let Some(command) = fields.next() else {
-            continue;
-        };
-        let Some(pid) = fields.next() else {
-            continue;
-        };
-        if seen.insert(pid.to_string()) {
-            result.push(ProcessHandle {
-                pid: pid.to_string(),
-                command: command.to_string(),
-            });
-        }
-    }
-    result
-}
-
-/// Internal: run `lsof_bin -w +d <path>` once and return the raw stdout text,
-/// or `Ok(String::new())` when no files are open. Shared by
-/// [`run_lsof`] and [`run_lsof_processes`] so the subprocess invocation and
-/// its stdout/stderr interpretation live in one place.
-fn run_lsof_raw(lsof_bin: &str, path: &Path) -> Result<String> {
-    let output = Command::new(lsof_bin)
-        .args(["-w", "+d", &path.to_string_lossy()])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "lsof not found on PATH — install lsof to use bs \
-                     (e.g. brew install lsof)"
-                )
-            } else {
-                anyhow::anyhow!("failed to spawn lsof: {}", e)
-            }
-        })?;
-
-    // `lsof +D` exits non-zero on macOS even when files are found; use
-    // stdout/stderr content as the authoritative signals.
-    if output.stdout.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // `-w` suppresses cosmetic warning diagnostics at the source, so any
-        // remaining stderr output is a genuine error.
-        let stderr = stderr.trim();
-        if stderr.is_empty() {
-            return Ok(String::new());
-        } else {
-            bail!("lsof error for {}: {}", path.display(), stderr);
-        }
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Internal helper: run `lsof_bin -w +d <path>` and return the distinct
-/// `(pid, command)` pairs with open file descriptors directly in `path`
-/// (non-recursive).
-///
-/// Separated from `list_open_processes` so tests can pass a non-existent
-/// binary name without mutating the global `PATH` environment variable.
-fn run_lsof_processes(lsof_bin: &str, path: &Path) -> Result<Vec<ProcessHandle>> {
-    let text = run_lsof_raw(lsof_bin, path)?;
-    Ok(parse_lsof_processes(&text))
-}
-
-/// Return the distinct processes (PID + command name) with an open file
-/// descriptor directly in `path` (non-recursive; the top-level directory
-/// only), deduplicated by PID.
-///
-/// Reuses the same subprocess invocation as [`has_open_files`] (via
-/// [`run_lsof_raw`]) but keeps the per-process detail instead of collapsing
-/// to a boolean. Error semantics are identical to [`has_open_files`].
-pub fn list_open_processes(path: &Path) -> Result<Vec<ProcessHandle>> {
-    run_lsof_processes("lsof", path)
-}
-
-/// Internal helper: run `lsof_bin -w +d <path>` and return whether any
-/// process has open file descriptors directly in `path` (non-recursive).
-///
-/// Separated from `has_open_files` so tests can pass a non-existent binary
-/// name without mutating the global `PATH` environment variable. Reuses
-/// [`run_lsof_raw`] for the actual subprocess invocation.
-fn run_lsof(lsof_bin: &str, path: &Path) -> Result<bool> {
-    let text = run_lsof_raw(lsof_bin, path)?;
-    Ok(!text.is_empty())
-}
-
-/// Detect whether any process currently has an open file descriptor directly
-/// in `path` (non-recursive; the top-level directory only).
-///
-/// Uses `lsof -w +d <path>` to query open file handles (`-w` suppresses
-/// cosmetic warning diagnostics).  A process whose current
-/// working directory is `path` is detected; a process with handles only in
-/// subdirectories of `path` is **not** detected.  The result is determined by
-/// stdout/stderr content (not exit code, which `lsof` sets unreliably across
-/// platforms):
-///
-/// - Non-empty stdout → at least one process has a handle in `path` →
-///   returns `Ok(true)`.
-/// - Empty stdout + empty stderr → no files are open → returns `Ok(false)`.
-/// - Spawn error (`lsof` not on `PATH`) → returns `Err` with an actionable
-///   message naming `lsof` as the missing dependency and including an install
-///   hint (e.g. `brew install lsof`).
-/// - Non-empty stderr → `lsof` itself encountered an error → returns `Err`
-///   propagating the `lsof` output.
-pub fn has_open_files(path: &Path) -> Result<bool> {
-    run_lsof("lsof", path)
 }
 
 /// Return `true` if the working tree at `slot_path` has no uncommitted
 /// changes (`git -C <slot> status --porcelain` produces empty output).
 pub fn is_clean(slot_path: &Path) -> Result<bool> {
     let output = git_cmd()
-        .args(["-C", &slot_path.to_string_lossy(), "status", "--porcelain"])
+        .args([
+            "-C",
+            &slot_path.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
         .output()
         .context("failed to spawn `git status --porcelain`")?;
 
@@ -954,7 +832,8 @@ pub fn validate_pool_slot(path: &Path, pool_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Return the first available (clean, unlocked, on-disk) slot in the pool,
+/// Return the first available (clean, unlocked, on-disk, no unmerged branch
+/// work) slot in the pool,
 /// or `None` if every slot is unavailable.
 ///
 /// Runs `git worktree prune` only when the worktree list contains at least one
@@ -966,14 +845,12 @@ pub fn find_available_slot(pool_dir: &Path) -> Result<Option<PathBuf>> {
         tracing::info!("Pruning stale worktrees from pool");
         prune_worktrees()?;
     }
+    let default_ref = LazyDefaultRef::new(Path::new("."));
     for entry in entries {
         if entry.locked || !entry.path.exists() {
             continue;
         }
-        if !is_clean(&entry.path)? {
-            continue;
-        }
-        if has_open_files(&entry.path)? {
+        if classify_slot_status(&entry, &default_ref)? != WorktreeStatus::Available {
             continue;
         }
         tracing::info!("Found available slot: {}", entry.path.display());
@@ -1417,17 +1294,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_open_processes_unlocked_is_in_use() {
+    fn classify_unmerged_work_unlocked_is_in_use() {
         assert_eq!(classify(false, false, true), WorktreeStatus::InUse);
     }
 
     #[test]
-    fn classify_dirty_and_open_processes_is_in_use() {
+    fn classify_dirty_and_unmerged_work_is_in_use() {
         assert_eq!(classify(false, true, true), WorktreeStatus::InUse);
     }
 
     #[test]
-    fn classify_clean_unlocked_no_processes_is_available() {
+    fn classify_clean_unlocked_no_unmerged_work_is_available() {
         assert_eq!(classify(false, false, false), WorktreeStatus::Available);
     }
 
@@ -1443,8 +1320,8 @@ mod tests {
     }
 
     /// A locked slot is classified `Locked` without ever invoking `git
-    /// status` or `lsof` — verified by pointing `PATH` at a directory that
-    /// only contains `git` (no `lsof` binary, and a `git` shim that would
+    /// status` — verified by pointing `PATH` at a directory that
+    /// only contains `git` (a `git` shim that would
     /// fail loudly if `status --porcelain` were invoked at all, since the
     /// slot directory below is never a real git repo).
     #[test]
@@ -1453,8 +1330,8 @@ mod tests {
 
         let dir = TempDir::new().expect("temp dir");
         let entry = synthetic_entry(dir.path().to_path_buf(), true);
-        let status = classify_slot_status(&entry).expect(
-            "a locked slot must classify without needing git status/lsof \
+        let status = classify_slot_status(&entry, &LazyDefaultRef::new(Path::new("."))).expect(
+            "a locked slot must classify without needing git status \
              (the directory is not a real git repo, so any subprocess call \
              other than the locked short-circuit would fail)",
         );
@@ -1466,12 +1343,10 @@ mod tests {
         let repo = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         // Use the current repo checkout, which is always unlocked here; we
         // only assert the outcome type, not force dirtiness, since CI/dev
-        // checkouts vary. This test mainly exercises that classify_slot_status
-        // runs without needing lsof when git reports a clean tree it still
-        // proceeds to check for open files (covered separately below).
+        // checkouts vary.
         let entry = synthetic_entry(repo, false);
         // Should not panic; result depends on host git state.
-        let _ = classify_slot_status(&entry);
+        let _ = classify_slot_status(&entry, &LazyDefaultRef::new(Path::new(".")));
     }
 
     #[test]
@@ -1484,11 +1359,11 @@ mod tests {
         // over all 8 boolean combinations.
         for locked in [false, true] {
             for dirty in [false, true] {
-                for has_processes in [false, true] {
-                    let status = classify(locked, dirty, has_processes);
+                for has_unmerged_work in [false, true] {
+                    let status = classify(locked, dirty, has_unmerged_work);
                     if locked {
                         assert_eq!(status, WorktreeStatus::Locked);
-                    } else if dirty || has_processes {
+                    } else if dirty || has_unmerged_work {
                         assert_eq!(status, WorktreeStatus::InUse);
                     } else {
                         assert_eq!(status, WorktreeStatus::Available);
@@ -1598,152 +1473,6 @@ mod tests {
         let detail = synthetic_git_status_lines("");
         assert!(detail.uncommitted.is_empty());
         assert!(detail.untracked.is_empty());
-    }
-
-    // -- parse_lsof_processes --------------------------------------------------
-
-    #[test]
-    fn parse_lsof_processes_deduplicates_by_pid() {
-        let mock_output = "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n\
-                           vim       100 user  cwd    DIR    1,2      512  123 /tmp/dir\n\
-                           vim       100 user  txt    REG    1,2     4096  456 /tmp/dir/f1\n\
-                           bash      200 user  txt    REG    1,2     4096  789 /tmp/dir/f2\n";
-        let processes = parse_lsof_processes(mock_output);
-        assert_eq!(processes.len(), 2);
-        assert_eq!(processes[0].pid, "100");
-        assert_eq!(processes[0].command, "vim");
-        assert_eq!(processes[1].pid, "200");
-        assert_eq!(processes[1].command, "bash");
-    }
-
-    #[test]
-    fn parse_lsof_processes_empty_output() {
-        assert!(parse_lsof_processes("").is_empty());
-    }
-
-    /// A file held open in a temp dir is reported with the correct PID by
-    /// `list_open_processes`.
-    #[test]
-    fn list_open_processes_returns_current_pid_when_file_open() {
-        use std::fs;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let file_path = dir.path().join("held_open.txt");
-        fs::write(&file_path, b"data").expect("write");
-        let _handle = fs::File::open(&file_path).expect("open file");
-
-        let processes =
-            list_open_processes(dir.path()).expect("list_open_processes should not error");
-        assert_eq!(
-            processes.len(),
-            1,
-            "one process (this test) holds the file open"
-        );
-        assert_eq!(processes[0].pid, std::process::id().to_string());
-    }
-
-    #[test]
-    fn list_open_processes_returns_empty_when_no_open_files() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-
-        let processes =
-            list_open_processes(dir.path()).expect("list_open_processes should not error");
-        assert!(processes.is_empty());
-    }
-
-    #[test]
-    fn list_open_processes_err_when_lsof_not_found() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let err = run_lsof_processes("/nonexistent/path/to/lsof-binary-xyz", dir.path())
-            .expect_err("run_lsof_processes should return Err when the binary is not found");
-        assert!(
-            err.to_string().contains("lsof"),
-            "error message should mention 'lsof', got: {err}"
-        );
-    }
-
-    // -- has_open_files -------------------------------------------------------
-
-    /// A file held open in a temp dir causes `has_open_files` to return `Ok(true)`.
-    #[test]
-    fn has_open_files_returns_true_when_file_open() {
-        use std::fs;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let file_path = dir.path().join("held_open.txt");
-        fs::write(&file_path, b"data").expect("write");
-        // Hold the file open for the duration of the assertion.
-        let _handle = fs::File::open(&file_path).expect("open file");
-
-        let result = has_open_files(dir.path());
-        assert_eq!(
-            result.expect("has_open_files should not error"),
-            true,
-            "a held-open file should cause has_open_files to return true"
-        );
-    }
-
-    /// A temp dir with no open handles returns `Ok(false)`.
-    #[test]
-    fn has_open_files_returns_false_when_no_open_files() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-
-        let result = has_open_files(dir.path());
-        assert_eq!(
-            result.expect("has_open_files should not error"),
-            false,
-            "a dir with no open handles should return false"
-        );
-    }
-
-    /// When the `lsof` binary cannot be found, `has_open_files` returns an
-    /// `Err` whose message names `lsof` as the missing dependency.
-    ///
-    /// Uses `run_lsof` directly with a non-existent binary name to avoid
-    /// mutating the global `PATH` environment variable.
-    #[test]
-    fn has_open_files_err_when_lsof_not_found() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let err = run_lsof("/nonexistent/path/to/lsof-binary-xyz", dir.path())
-            .expect_err("run_lsof should return Err when the binary is not found");
-
-        assert!(
-            err.to_string().contains("lsof"),
-            "error message should mention 'lsof', got: {err}"
-        );
-    }
-
-    /// `lsof +d` (non-recursive) must NOT detect a file open only in a
-    /// subdirectory.  This is the key behavioural difference from `lsof +D`.
-    #[test]
-    fn has_open_files_returns_false_when_file_open_in_subdirectory() {
-        use std::fs;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let subdir = dir.path().join("subdir");
-        fs::create_dir(&subdir).expect("create subdir");
-        let file_path = subdir.join("held_open.txt");
-        fs::write(&file_path, b"data").expect("write");
-        // Hold the file open inside the *subdirectory*, not in dir.path() itself.
-        let _handle = fs::File::open(&file_path).expect("open file");
-
-        let result = has_open_files(dir.path());
-        assert_eq!(
-            result.expect("has_open_files should not error"),
-            false,
-            "lsof +d (non-recursive) should NOT detect a file open only in a subdirectory"
-        );
     }
 
     // -- branch_mode -----------------------------------------------------------

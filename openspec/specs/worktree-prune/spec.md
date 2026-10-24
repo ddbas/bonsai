@@ -32,7 +32,7 @@ requirement) and delete the on-disk directories of all the others.
 #### Scenario: Mixed pool with locked, in-use, and multiple available slots
 
 - **WHEN** the user runs `bs prune` against a pool containing one locked slot,
-  one in-use (dirty or open-file) slot, and two available slots
+  one in-use (dirty or unmerged-branch) slot, and two available slots
 - **THEN** the locked and in-use slots' directories remain untouched on disk,
   one of the two available slots' directories is deleted, and the other
   available slot's directory is preserved (not deleted)

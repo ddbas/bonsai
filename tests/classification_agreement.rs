@@ -1,6 +1,6 @@
 //! Integration test asserting `bs list`'s badge and `bs status`'s
 //! classification agree for the same slot across representative fixtures
-//! (locked, dirty, open-process, clean) — guarding against the two call
+//! (locked, dirty, unmerged-branch, clean) — guarding against the two call
 //! sites (`classify_slot_status` and `slot_status`) drifting apart now that
 //! they gather signals differently but both route through the shared
 //! `classify()` function.
@@ -97,13 +97,12 @@ async fn list_and_status_agree_on_locked_and_dirty_slot() {
 }
 
 #[tokio::test]
-async fn list_and_status_agree_on_open_process_slot() {
+async fn list_and_status_agree_on_unmerged_branch_slot() {
     let env = GitEnv::new().await;
-    let slot = env.run_get();
-
-    let file_path = slot.join("held_open.txt");
-    std::fs::write(&file_path, b"data").expect("write");
-    let _handle = std::fs::File::open(&file_path).expect("open file");
-
+    env.git(&["checkout", "-q", "-b", "feat"]).await;
+    env.make_commit("f.txt", "f").await;
+    env.git(&["checkout", "-q", "-"]).await;
+    let slot = env.run_get_branch("feat");
+    assert_eq!(env.status_word(&slot), "in use");
     assert_list_and_status_agree(&env, &slot).await;
 }

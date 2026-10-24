@@ -98,43 +98,6 @@ any user-provided input.
 - **THEN** the full path SHALL follow the pattern
   `<root>/<repo-slug>/<uuid-prefix>/`
 
-### Requirement: Pool is scanned for an available slot before creating a new one
-
-Before creating a new worktree, `bs get` SHALL scan all registered worktrees
-under the managed pool path. A slot is **available** if and only if: (1) its
-directory exists on disk, (2) it is not locked, (3) its working tree is clean
-(`git -C <slot-path> status --porcelain` returns no output), and (4) no process
-currently has an open file descriptor **directly in** the slot root directory
-(as determined by `lsof +d <slot-path>`). Processes with open handles only in
-subdirectories of the slot SHALL NOT cause the slot to be classified as in use.
-If `lsof` cannot be run, the CLI SHALL exit with a non-zero status and an
-actionable error message.
-
-#### Scenario: Available slot found in pool
-
-- **WHEN** at least one pool slot is not locked, has a clean working tree, and
-  no process has a file open directly in its root directory
-- **THEN** `bs get` SHALL reuse that slot rather than creating a new one
-- **THEN** `git worktree add` SHALL NOT be called
-
-#### Scenario: All pool slots are unavailable
-
-- **WHEN** every pool slot is either locked, has uncommitted changes, or has a
-  process with an open handle directly in its root
-- **THEN** `bs get` SHALL create a new UUID-named slot
-
-#### Scenario: Pool is empty
-
-- **WHEN** no slots exist under the managed pool path
-- **THEN** `bs get` SHALL create a new UUID-named slot
-
-#### Scenario: Slot with open file handles is not reused
-
-- **WHEN** a pool slot is unlocked and has a clean working tree
-- **WHEN** a shell process has CWD = the slot root
-- **THEN** `bs get` SHALL NOT reuse that slot
-- **THEN** `bs get` SHALL continue scanning remaining slots or create a new one
-
 ### Requirement: Stale registrations are pruned only when detected
 
 `bs get` SHALL run `git worktree prune` before scanning the pool **only if** the
@@ -252,3 +215,44 @@ an existing available slot" and "create a brand-new slot" code paths.
 - **THEN** the provisioning flow SHALL behave exactly as it did before this
   capability was introduced, with no additional filesystem operations beyond
   slot creation/reset and branch checkout
+
+### Requirement: Pool is scanned for a git-state-available slot before creating a new one
+
+Before creating a new worktree, `bs get` SHALL scan all registered worktrees
+under the managed pool path. A slot is **available** if and only if: (1) its
+directory exists on disk, (2) it is not locked, (3) its working tree is clean
+(`git -C <slot-path> status --porcelain --untracked-files=all` returns no
+output), and (4) its branch state carries no unmerged work (see
+`worktree-branch-state`). Open processes in the slot SHALL NOT affect
+availability.
+
+#### Scenario: Available slot found in pool
+
+- **WHEN** at least one pool slot is not locked, has a clean working tree, and
+  has no unmerged work
+- **THEN** `bs get` SHALL reuse that slot rather than creating a new one
+- **THEN** `git worktree add` SHALL NOT be called
+
+#### Scenario: All pool slots are unavailable
+
+- **WHEN** every pool slot is either locked, has uncommitted changes, or has
+  unmerged branch work
+- **THEN** `bs get` SHALL create a new UUID-named slot
+
+#### Scenario: Pool is empty
+
+- **WHEN** no slots exist under the managed pool path
+- **THEN** `bs get` SHALL create a new UUID-named slot
+
+#### Scenario: Slot with open file handles is still reused
+
+- **WHEN** a pool slot is unlocked, clean, has no unmerged work, and a process
+  has its CWD at the slot root
+- **THEN** `bs get` SHALL reuse that slot
+
+#### Scenario: Slot with unmerged work is not reused
+
+- **WHEN** a pool slot is unlocked and clean but its branch has commits not on
+  the default ref
+- **THEN** `bs get` SHALL NOT reuse that slot
+- **THEN** `bs get` SHALL continue scanning remaining slots or create a new one
