@@ -42,7 +42,7 @@
 - [x] 2.3 Add Biome `noRestrictedImports` override for `packages/core` (no
       adapters, pino, commander, `node:*`); verify a temporary `node:fs` import
       in core fails lint, then revert
-- [ ] 2.4 Define port interfaces (`Git`, `Tmux`, `Logger`, clock/fs as needed)
+- [x] 2.4 Define port interfaces (`Git`, `Tmux`, `Logger`, clock/fs as needed)
       in `packages/core/src/ports.ts`; verify typecheck passes
 - [ ] 2.5 Ask the user for permission to create root and per-package `AGENTS.md`
       (mirroring agentctl); create them only if approved
@@ -67,34 +67,34 @@
 
 ## 4. Core
 
-- [ ] 4.1 Port pure types and classification (`classify`, slot status,
+- [x] 4.1 Port pure types and classification (`classify`, slot status,
       `tilde_path`, slot naming, locked-line parsing) to `packages/core` with
       unit tests; verify tests cover locked > in use > available priority
-- [ ] 4.2 Port branch-state logic (`branch_state.rs`: default-ref selection,
+- [x] 4.2 Port branch-state logic (`branch_state.rs`: default-ref selection,
       merged/squash/rebase detection) with unit tests for each README "When is a
       slot available?" case; verify tests pass
-- [ ] 4.3 Implement use cases (get, list, status, lock/unlock, prune incl.
+- [x] 4.3 Implement use cases (get, list, status, lock/unlock, prune incl.
       preserve-one-available, info, copy-ignored-files) against ports with unit
       tests using fakes; verify tests pass
-- [ ] 4.4 Port the intent of `classification_agreement.rs` and remaining inline
+- [x] 4.4 Port the intent of `classification_agreement.rs` and remaining inline
       Rust unit tests from the 3.5 checklist; verify checklist is empty
 
 ## 5. Adapters
 
-- [ ] 5.1 Implement `packages/git` (async `execFile`, bounded parallelism, git
+- [x] 5.1 Implement `packages/git` (async `execFile`, bounded parallelism, git
       env handling per `git_cmd()`) with parser unit tests; verify typecheck and
       tests pass
-- [ ] 5.2 Implement `packages/tmux` (port `src/tmux.rs`, `BONSAI_TMUX_SOCKET`,
+- [x] 5.2 Implement `packages/tmux` (port `src/tmux.rs`, `BONSAI_TMUX_SOCKET`,
       detached sessions) with unit tests; verify tests pass
-- [ ] 5.3 Implement `packages/logging` with pino 10.4.0 (levels, log file
+- [x] 5.3 Implement `packages/logging` with pino 10.4.0 (levels, log file
       location/format per `src/logging.rs`); verify unit tests pass
 
 ## 6. CLI and parity
 
-- [ ] 6.1 Implement commander program and composition root in `apps/bonsai/src`
+- [x] 6.1 Implement commander program and composition root in `apps/bonsai/src`
       (all subcommands/options, exact help text, picocolors output,
       `BONSAI_ROOT`); verify `program.test.ts` passes
-- [ ] 6.2 Build `dist/cli.cjs` and run the full e2e suite with default `BS_BIN`;
+- [x] 6.2 Build `dist/cli.cjs` and run the full e2e suite with default `BS_BIN`;
       verify it passes with no weakened assertions (justify and flag any
       exception)
 - [ ] 6.3 Measure `bs list` startup on a 5-slot pool and report the cold-start
@@ -102,7 +102,7 @@
 
 ## 7. Performance SLO
 
-- [ ] 7.1 Implement a vitest perf test on core classification with a fake git
+- [x] 7.1 Implement a vitest perf test on core classification with a fake git
       port covering all-locked, all-dirty and all-available scenarios at 5 and
       50 slots, enforcing the thresholds in the `worktree-list` spec; verify it
       passes and fails when a threshold is artificially lowered

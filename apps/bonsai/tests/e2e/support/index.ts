@@ -31,6 +31,9 @@ import {
   Wait,
 } from "testcontainers";
 import { expect, onTestFinished } from "vitest";
+import { stripAnsi } from "./ansi.ts";
+
+export { stripAnsi };
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -375,10 +378,4 @@ export function tildePath(path: string): string {
   if (path === home) return "~/";
   if (path.startsWith(`${home}/`)) return `~/${path.slice(home.length + 1)}`;
   return path;
-}
-
-/** Strip ANSI CSI escape sequences (colour codes) from a string. */
-export function stripAnsi(s: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ESC
-  return s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 }

@@ -28,6 +28,7 @@ export default {
   plugins: [
     new rspack.BannerPlugin({
       banner: "#!/usr/bin/env node",
+      raw: true,
       entryOnly: true,
     }),
     {
