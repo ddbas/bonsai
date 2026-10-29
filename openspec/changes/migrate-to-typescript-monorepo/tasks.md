@@ -1,45 +1,45 @@
 ## 1. Scaffold monorepo root
 
-- [ ] 1.1 Add `.nvmrc` (Node 26.x as in agentctl) and set
+- [x] 1.1 Add `.nvmrc` (Node 26.x as in agentctl) and set
       `idiomatic_version_file_enable_tools = ["node"]` in `mise.toml`; verify
       `mise exec -- node --version` matches `.nvmrc`
-- [ ] 1.2 Add root `package.json` (private, ESM, exact-pinned latest
+- [x] 1.2 Add root `package.json` (private, ESM, exact-pinned latest
       typescript/turbo/vitest/@biomejs/biome/@types/node, pnpm `packageManager`)
       and `pnpm-workspace.yaml` (`apps/*`, `packages/*`, `minimumReleaseAge`,
       `allowBuilds`); verify `pnpm install` succeeds
-- [ ] 1.3 Add `tsconfig.base.json` (strict, `noUncheckedIndexedAccess`,
+- [x] 1.3 Add `tsconfig.base.json` (strict, `noUncheckedIndexedAccess`,
       `verbatimModuleSyntax`, ES2023, Bundler resolution) and `turbo.json`
       (build/typecheck/test/ci tasks with inputs/outputs, `passThroughEnv`,
       `//#lint`, `//#format:biome`); verify `turbo run build` runs on the empty
       workspace
-- [ ] 1.4 Add `biome.json` (vcs ignore file, organizeImports assist,
+- [x] 1.4 Add `biome.json` (vcs ignore file, organizeImports assist,
       `noExplicitAny` error, Markdown formatter `proseWrap: always`, ignore
       `.agents .pi .opencode .codegraph .mise dist node_modules openspec`);
       verify `biome check .` passes
-- [ ] 1.5 Rewrite `mise.toml` tools/tasks
+- [x] 1.5 Rewrite `mise.toml` tools/tasks
       (`build typecheck test lint format ci install openspec:open` calling
       `turbo run`; drop rust, cargo-edit, pandoc, prettier, cargo/bench tasks,
       node pin) and commit `mise.lock`; verify `mise tasks` lists them and
       `mise run lint` passes
-- [ ] 1.6 Rewrite `lefthook.yml` to call only `mise run` (format with
+- [x] 1.6 Rewrite `lefthook.yml` to call only `mise run` (format with
       `stage_fixed`, single turbo-ordered verification, openspec validate via
       `scripts/openspec-validate-staged.sh`); verify a test commit runs the
       hooks
-- [ ] 1.7 Update `.gitignore` (node_modules, dist, .turbo, coverage, mise lock
+- [x] 1.7 Update `.gitignore` (node_modules, dist, .turbo, coverage, mise lock
       layout) and run `npx skills add vercel/turborepo`; verify
       `skills-lock.json` lists `turborepo`
 
 ## 2. Package skeletons and boundaries
 
-- [ ] 2.1 Create `packages/core`, `packages/git`, `packages/tmux`,
+- [x] 2.1 Create `packages/core`, `packages/git`, `packages/tmux`,
       `packages/logging` (`@bonsai/*`, exports `./src/index.ts`, typecheck/test
       scripts, tsconfig) and `apps/bonsai` mirroring agentctl; verify
       `mise run typecheck` passes
-- [ ] 2.2 Add `apps/bonsai/rspack.config.ts` (builtin swc loader, shebang
+- [x] 2.2 Add `apps/bonsai/rspack.config.ts` (builtin swc loader, shebang
       banner, chmod 755, version DefinePlugin → `dist/cli.cjs`) and
       `vitest.config.ts` (120s timeouts); verify `mise run build` emits an
       executable `cli.cjs`
-- [ ] 2.3 Add Biome `noRestrictedImports` override for `packages/core` (no
+- [x] 2.3 Add Biome `noRestrictedImports` override for `packages/core` (no
       adapters, pino, commander, `node:*`); verify a temporary `node:fs` import
       in core fails lint, then revert
 - [ ] 2.4 Define port interfaces (`Git`, `Tmux`, `Logger`, clock/fs as needed)

@@ -1,0 +1,27 @@
+{
+  "name": "bonsai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bs": "./dist/cli.cjs"
+  },
+  "dependencies": {
+    "@bonsai/core": "workspace:*",
+    "@bonsai/git": "workspace:*",
+    "@bonsai/logging": "workspace:*",
+    "@bonsai/tmux": "workspace:*",
+    "commander": "15.0.0",
+    "picocolors": "1.1.1"
+  },
+  "devDependencies": {
+    "@rspack/cli": "2.2.8",
+    "@rspack/core": "2.2.8",
+    "testcontainers": "12.2.0"
+  },
+  "scripts": {
+    "build": "rspack build",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  }
+}

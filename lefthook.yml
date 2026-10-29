@@ -4,38 +4,14 @@ post-checkout:
     - name: codegraph
       run: mise exec -- codegraph init
 pre-commit:
-  parallel: true
   jobs:
     - name: format
-      group:
-        parallel: true
-        jobs:
-          - name: rust
-            run: cargo fmt
-            glob: "*.rs"
-            stage_fixed: true
-          - name: markdown
-            run: mise exec -- prettier --write {staged_files}
-            glob: "*.md"
-            stage_fixed: true
-    - name: lint
-      glob: "*.rs"
-      run: cargo clippy -- -D warnings
+      glob: "*.{ts,cjs,mjs,json,jsonc,md}"
+      run: mise run format {staged_files}
       stage_fixed: true
-    - name: test
-      run: mise run test
-      glob:
-        - "Cargo.toml"
-        - "Cargo.lock"
-        - "src/**/*.rs"
-        - "tests/**/*.rs"
-    - name: bench
-      run: mise run bench
-      glob:
-        - "Cargo.toml"
-        - "Cargo.lock"
-        - "src/**/*.rs"
-        - "benches/**/*.rs"
+    # turbo orders build -> typecheck/test/lint so each runs once
+    - name: verify
+      run: mise run ci
     - name: openspec-validate
       run: bash scripts/openspec-validate-staged.sh {staged_files}
       glob: "openspec/**"
