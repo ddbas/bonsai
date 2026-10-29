@@ -49,18 +49,18 @@
 
 ## 3. E2E test infrastructure and oracle
 
-- [ ] 3.1 Port `tests/common/mod.rs` (`GitEnv`, container helpers) to
+- [x] 3.1 Port `tests/common/mod.rs` (`GitEnv`, container helpers) to
       `apps/bonsai/tests/e2e/support/` with a test-image Dockerfile and `BS_BIN`
       resolution (script paths run via node); verify the canary test (port of
       `e2e_example.rs`) passes with Docker running
-- [ ] 3.2 Port `worktree_get.rs`, `worktree_get_tmux.rs`,
+- [x] 3.2 Port `worktree_get.rs`, `worktree_get_tmux.rs`,
       `worktree_copy_ignored_files.rs` to vitest; verify they pass with `BS_BIN`
       = the Rust binary
-- [ ] 3.3 Port `worktree_list.rs`, `worktree_status.rs`,
+- [x] 3.3 Port `worktree_list.rs`, `worktree_status.rs`,
       `worktree_branch_state.rs`; verify they pass against the Rust binary
-- [ ] 3.4 Port `worktree_lock.rs`, `worktree_prune.rs`, `info_command.rs`,
+- [x] 3.4 Port `worktree_lock.rs`, `worktree_prune.rs`, `info_command.rs`,
       `help_command.rs`, `logging.rs`; verify they pass against the Rust binary
-- [ ] 3.5 Record Rust tests that are not black-box
+- [x] 3.5 Record Rust tests that are not black-box
       (`classification_agreement.rs`, inline `#[cfg(test)]` in `src/`) in a
       checklist for task group 4; verify every `tests/*.rs` file is either
       ported or listed
