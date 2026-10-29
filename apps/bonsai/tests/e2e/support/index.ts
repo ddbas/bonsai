@@ -147,9 +147,18 @@ export class GitEnv {
   }
 
   async dispose(): Promise<void> {
+    // On Linux the container (root) may have created files the host user
+    // cannot delete; open them up while the container is still running.
+    await this.container
+      .exec(["chmod", "-R", "a+rwX", "/workspace"])
+      .catch(() => {});
     await this.container.stop({ timeout: 1 }).catch(() => {});
-    rmSync(this.repoTmp, { recursive: true, force: true });
-    rmSync(this.bonsaiTmp, { recursive: true, force: true });
+    // Best-effort cleanup: leftovers in the OS temp dir must not fail a test.
+    for (const dir of [this.repoTmp, this.bonsaiTmp]) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {}
+    }
   }
 
   /** Run `git -C /workspace <args>` in the container; throws on failure. */
