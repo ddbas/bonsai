@@ -134,10 +134,10 @@
 
 ## 10. Final verification
 
-- [ ] 10.1 From a clean state (`rm -rf node_modules dist .turbo`), run
+- [x] 10.1 From a clean state (`rm -rf node_modules dist .turbo`), run
       `mise install`, `pnpm install --frozen-lockfile` via mise, and
       `mise run ci`; verify all pass
-- [ ] 10.2 Run `mise run install` and smoke-test `~/.local/bin/bs` (`get`,
+- [x] 10.2 Run `mise run install` and smoke-test `~/.local/bin/bs` (`get`,
       `list`, `status`, `lock`) in a scratch git repo
 - [ ] 10.3 Push the branch and open a single PR following the
       create-pull-request skill; verify CI is green
