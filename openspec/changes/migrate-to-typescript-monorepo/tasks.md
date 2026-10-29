@@ -97,7 +97,7 @@
 - [x] 6.2 Build `dist/cli.cjs` and run the full e2e suite with default `BS_BIN`;
       verify it passes with no weakened assertions (justify and flag any
       exception)
-- [ ] 6.3 Measure `bs list` startup on a 5-slot pool and report the cold-start
+- [x] 6.3 Measure `bs list` startup on a 5-slot pool and report the cold-start
       figure to the user
 
 ## 7. Performance SLO
@@ -109,17 +109,17 @@
 
 ## 8. CI, hooks, docs, OpenSpec
 
-- [ ] 8.1 Replace `.github/workflows/ci.yml` with one job (concurrency, timeout,
+- [x] 8.1 Replace `.github/workflows/ci.yml` with one job (concurrency, timeout,
       `jdx/mise-action` with cache, `.turbo` cache, `mise run ci`); delete
       `.github/workflows/release.yml` and `.mise/tasks/release`; verify CI is
       green on the PR
-- [ ] 8.2 Remove `.prettierrc.json`/`.prettierignore`; run Biome format on repo
+- [x] 8.2 Remove `.prettierrc.json`/`.prettierignore`; run Biome format on repo
       Markdown; verify `mise run lint` passes
-- [ ] 8.3 Update `openspec/config.yaml` context
+- [x] 8.3 Update `openspec/config.yaml` context
       (TypeScript/Node/pnpm/Turborepo/Rspack/Biome/vitest, binary `bs`,
       conventional commits); verify `openspec validate --all --no-interactive`
       passes
-- [ ] 8.4 Check README for cargo/Rust wording and adjust only what is required
+- [x] 8.4 Check README for cargo/Rust wording and adjust only what is required
       (ask before other doc edits); verify `grep -ri "cargo" README.md` is empty
 
 ## 9. Remove Rust
