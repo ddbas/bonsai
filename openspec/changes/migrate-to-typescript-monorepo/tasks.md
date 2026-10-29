@@ -124,10 +124,10 @@
 
 ## 9. Remove Rust
 
-- [ ] 9.1 Delete `Cargo.toml`, `Cargo.lock`, `src/`, Rust files under `tests/`,
+- [x] 9.1 Delete `Cargo.toml`, `Cargo.lock`, `src/`, Rust files under `tests/`,
       `benches/`, `scripts/check-bs-ls-perf.sh`, `target/`; verify `mise run ci`
       still passes
-- [ ] 9.2 Remove `.agents/skills/rust-*` (and `skills-lock.json` / mirrored
+- [x] 9.2 Remove `.agents/skills/rust-*` (and `skills-lock.json` / mirrored
       entries); verify
       `grep -rniE "cargo|clippy|rustfmt" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=archive`
       shows no stale references

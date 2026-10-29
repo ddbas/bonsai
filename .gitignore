@@ -7,5 +7,4 @@ coverage/
 
 # MacOS
 .DS_Store
-target/
 .mise/locks/
