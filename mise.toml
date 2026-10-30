@@ -1,6 +1,7 @@
 #:schema https://mise.jdx.dev/schema/mise.json
 
 [settings]
+experimental = true
 lockfile = true
 
 [hooks]
@@ -18,8 +19,9 @@ description = "Build all packages"
 run = "mise exec -- pnpm run build"
 
 [tasks.deps]
-description = "Install dependencies"
-run = "pnpm install"
+description = "Install all dependencies"
+usage = 'flag "--frozen-lockfile" help="Fail if the lockfile needs updating"'
+run = "pnpm install ${usage_frozen_lockfile:+--frozen-lockfile}"
 
 [tasks.test]
 description = "Run all tests (builds first)"

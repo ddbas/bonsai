@@ -1,34 +1,23 @@
-name: CI
+name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
+    branches: ["main"]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+env:
+  MISE_EXPERIMENTAL: true
 
 jobs:
   ci:
-    name: Build, test, lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
-        with:
-          install: true
-          cache: true
-      - name: Cache turbo
-        uses: actions/cache@v4
-        with:
-          path: .turbo
-          key: ${{ runner.os }}-turbo-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-turbo-
-      - run: pnpm install --frozen-lockfile
-      - run: mise run ci
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v3
+      - run: mise run deps --frozen-lockfile
+      - run: mise exec -- pnpm turbo run ci
