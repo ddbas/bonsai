@@ -1,0 +1,26 @@
+{
+  "name": "bonsai-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "scripts": {
+    "build": "turbo run build",
+    "install:local": "mkdir -p \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}\" && rm -f \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}/bs\" && install -m 755 \"$PWD/apps/bonsai/dist/cli.cjs\" \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}/bs\"",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write --no-errors-on-unmatched",
+    "openspec:list": "openspec list",
+    "openspec:validate": "openspec validate --all --no-interactive",
+    "preinstall:local": "pnpm run build",
+    "test": "turbo run test",
+    "verify": "turbo run verify",
+    "verify:fix": "turbo run verify:fix"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@fission-ai/openspec": "^1.15.0",
+    "@types/node": "26.6.5",
+    "turbo": "2.11.7",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  }
+}

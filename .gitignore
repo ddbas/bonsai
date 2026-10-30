@@ -1,5 +1,9 @@
 # Build
-target/
+node_modules/
+dist/
+.turbo/
+coverage/
+*.tsbuildinfo
 
 # MacOS
 .DS_Store

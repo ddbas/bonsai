@@ -1,20 +1,22 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context shown to AI when creating artifacts.
+context: |
+  Tech stack: TypeScript (strict, ESM) on Node.js, in a pnpm + Turborepo
+  monorepo. Rspack bundles the CLI into a single executable file; commander
+  parses arguments; pino writes the log file; Biome lints and formats (including
+  Markdown); vitest + testcontainers run the unit and e2e tests.
+  Layout (hexagonal): packages/core (domain, use cases, ports; no Node APIs),
+  packages/git, packages/tmux, packages/logging (adapters), apps/bonsai (thin
+  CLI + composition root).
+  Binary: `bs` (bonsai) — provisions clean git worktrees for fast
+  context-switching. Requires Node.js at runtime.
+  Workflow: every routine action is a mise task that calls `turbo run`
+  (`mise run build|typecheck|test|lint|format|ci|install`); git hooks and CI call
+  only mise tasks.
+  We use conventional commits.
 
 # Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+# rules:
+#   proposal:
+#     - Keep proposals under 500 words

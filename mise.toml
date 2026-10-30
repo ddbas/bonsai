@@ -1,53 +1,55 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+
+[settings]
+experimental = true
+lockfile = true
+
 [hooks]
-enter = "lefthook install"
-
-[tasks.build]
-description = "Build the cargo project"
-run = "rtk cargo build"
-sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
-outputs = ["target/debug/bs"]
-
-[tasks."build:release"]
-description = "Build the cargo project in release mode"
-run = "rtk cargo build --release"
-sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
-outputs = ["target/release/bs"]
-
-[tasks.dev]
-description = "Run the cargo project"
-run = "cargo run"
-
-[tasks.install]
-description = "Build release binary and copy it to ~/.local/bin/bs"
-depends = ["build:release"]
-run = "mkdir -p ~/.local/bin && cp \"$(pwd)/target/release/bs\" ~/.local/bin/bs"
-outputs = ["~/.local/bin/bs"]
-
-[tasks."openspec:open"]
-description = "Render an OpenSpec proposal to HTML and open it in the browser"
-usage = '''
-arg "<change-id>" help="OpenSpec change ID to preview (e.g. my-feature)"
-complete "change-id" run="openspec list --json | jq -r '.changes[].name'"
-'''
-run = "scripts/view-proposal.sh ${usage_change_id?}"
-
-[tasks.test]
-description = "Run the cargo test suite"
-run = "rtk cargo test"
-sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "tests/**/*.rs"]
-
-[tasks.bench]
-description = "Run the bs ls performance benchmark and enforce its SLOs (see openspec/changes/add-bs-status-command/specs/worktree-list/spec.md)"
-run = "scripts/check-bs-ls-perf.sh"
-sources = ["Cargo.toml", "Cargo.lock", "src/**/*.rs", "benches/**/*.rs"]
-outputs = ["target/criterion/classify_slot_status_all_locked/**/*"]
+enter = "mise exec -- lefthook install"
 
 [tools]
 lefthook = "latest"
 "github:rtk-ai/rtk" = "latest"
 "npm:@colbymchenry/codegraph" = "latest"
-"npm:@fission-ai/openspec" = "latest"
-pandoc = "latest"
-prettier = "latest"
-rust = "1.96.0"
-"cargo:cargo-edit" = "latest"
+pnpm = "12.16.1"
+
+[tasks.build]
+description = "Build all packages"
+run = "mise exec -- pnpm run build"
+
+[tasks.deps]
+description = "Install all dependencies"
+usage = 'flag "--frozen-lockfile" help="Fail if the lockfile needs updating"'
+run = "mise exec -- pnpm install ${usage_frozen_lockfile:+--frozen-lockfile}"
+
+[tasks.install]
+description = "Build and symlink bonsai into the local bin dir"
+run = "mise exec -- pnpm run install:local"
+
+[tasks.lint]
+description = "Lint all packages"
+run = "mise exec -- pnpm run lint"
+
+[tasks."lint:fix"]
+description = "Lint all packages"
+run = "mise exec -- pnpm run lint:fix"
+
+[tasks."openspec:list"]
+description = "List all OpenSpec proposals"
+run = "mise exec -- pnpm run openspec:list"
+
+[tasks."openspec:validate"]
+description = "Validate all OpenSpec files"
+run = "mise exec -- pnpm run openspec:validate"
+
+[tasks.test]
+description = "Run all tests"
+run = "mise exec -- pnpm run test"
+
+[tasks.verify]
+description = "Run all verifications"
+run = "mise exec -- pnpm run verify"
+
+[tasks."verify:fix"]
+description = "Run all verifications and fix any fixable issues"
+run = "mise exec -- pnpm run verify:fix"

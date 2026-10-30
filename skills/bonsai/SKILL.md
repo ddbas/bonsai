@@ -1,10 +1,8 @@
 ---
-name: bonsai
-description:
-  Use this tool when you need to perform operations on git worktrees, such as
-  creating new worktrees, listing existing ones, retrieving worktree status
-  information and more.
-argument-hint: <git worktree query>
+
+name: bonsai description: Use this tool when you need to perform operations on
+git worktrees, such as creating new worktrees, listing existing ones, retrieving
+worktree status information and more. argument-hint: <git worktree query>
 author: David Bastien (ddbas)
 ---
 

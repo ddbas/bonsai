@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+minimumReleaseAge: 1440
+allowBuilds:
+  esbuild: false
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

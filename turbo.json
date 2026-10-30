@@ -1,0 +1,26 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "agentGuidance": false,
+  "globalDependencies": ["tsconfig.base.json"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "passThroughEnv": ["BS_BIN", "DOCKER_HOST", "TESTCONTAINERS_*"]
+    },
+    "//#lint": {},
+    "//#lint:fix": {},
+    "openspec:validate": {
+      "inputs": ["openspec/**"]
+    },
+    "verify": {
+      "dependsOn": ["build", "//#lint", "openspec:validate", "test"]
+    },
+    "verify:fix": {
+      "dependsOn": ["build", "//#lint:fix", "openspec:validate", "test"]
+    }
+  }
+}
