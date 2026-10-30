@@ -138,6 +138,11 @@ export function createGit(options: GitOptions = {}): Git {
       await must(args, "git checkout");
     },
 
+    async resetHardAndClean(slot) {
+      await must(["-C", slot, "reset", "--hard"], "git reset --hard");
+      await must(["-C", slot, "clean", "-fd"], "git clean");
+    },
+
     async worktreeAdd(slot, headSha, branch) {
       const args =
         branch === undefined

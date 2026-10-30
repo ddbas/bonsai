@@ -417,6 +417,116 @@ describe("prunePool", () => {
   });
 });
 
+describe("prunePool paths and force", () => {
+  const dirty = (w: ReturnType<typeof makeWorld>, s: string) =>
+    w.git.statuses.set(s, {
+      uncommitted: [],
+      untracked: [{ code: "??", path: "x" }],
+    });
+
+  it("deletes a targeted available slot, preserving an untargeted one untouched", async () => {
+    const w = makeWorld();
+    const [a, b] = addSlots(w, [{ branch: "keep" }, {}]) as [string, string];
+    for (const s of [a, b]) makeAvailable(w, s);
+    const outcome = await prunePool(w.deps, { paths: [b] });
+    expect(outcome?.pruned.map((p) => p.path)).toEqual([b]);
+    expect(outcome?.preserved?.path).toBe(a);
+    expect(w.git.count("checkout")).toBe(0);
+    expect(w.git.count("resetHardAndClean")).toBe(0);
+  });
+
+  it("preserves a lone targeted available slot", async () => {
+    const w = makeWorld();
+    const [a] = addSlots(w, [{}]) as [string];
+    makeAvailable(w, a);
+    const outcome = await prunePool(w.deps, { paths: [a] });
+    expect(outcome?.pruned).toEqual([]);
+    expect(outcome?.preserved?.path).toBe(a);
+  });
+
+  it("rejects unmanaged, locked and in-use targets without force, changing nothing", async () => {
+    const w = makeWorld();
+    const [locked, busy, free] = addSlots(w, [{ locked: true }, {}, {}]) as [
+      string,
+      string,
+      string,
+    ];
+    dirty(w, busy);
+    makeAvailable(w, free);
+    await expect(
+      prunePool(w.deps, { paths: ["/nope", locked, busy, free] }),
+    ).rejects.toThrow(/not a bonsai-managed[\s\S]*locked[\s\S]*--force/);
+    expect(w.fs.removed).toEqual([]);
+    expect(w.git.count("worktreePrune")).toBe(0);
+  });
+
+  it("refuses locked targets even with force", async () => {
+    const w = makeWorld();
+    const [locked, free] = addSlots(w, [{ locked: true }, {}]) as [
+      string,
+      string,
+    ];
+    makeAvailable(w, free);
+    await expect(
+      prunePool(w.deps, { paths: [free, locked], force: true }),
+    ).rejects.toThrow("unlock");
+    expect(w.fs.removed).toEqual([]);
+  });
+
+  it("force without paths skips locked slots and deletes in-use ones", async () => {
+    const w = makeWorld();
+    const [locked, busy1, busy2, free] = addSlots(w, [
+      { locked: true },
+      {},
+      {},
+      {},
+    ]) as [string, string, string, string];
+    dirty(w, busy1);
+    dirty(w, busy2);
+    makeAvailable(w, free);
+    const outcome = await prunePool(w.deps, { force: true });
+    expect(outcome?.pruned.map((p) => p.path)).toEqual([busy1, busy2]);
+    expect(outcome?.preserved?.path).toBe(free);
+    expect(w.fs.paths.has(locked)).toBe(true);
+    expect(w.git.count("resetHardAndClean")).toBe(0);
+  });
+
+  it("sanitizes the first in-use slot when none is available", async () => {
+    const w = makeWorld();
+    const [a, b] = addSlots(w, [{ branch: "feat" }, {}]) as [string, string];
+    dirty(w, a);
+    dirty(w, b);
+    const outcome = await prunePool(w.deps, { force: true });
+    expect(w.git.calls).toContain(`resetHardAndClean ${a}`);
+    expect(w.git.calls).toContain(`checkout ${a} ${w.git.headSha} -`);
+    expect(outcome?.preserved).toEqual({ path: a, branch: "feat" });
+    expect(outcome?.pruned.map((p) => p.path)).toEqual([b]);
+  });
+
+  it("does not delete a slot whose sanitizing fails", async () => {
+    const w = makeWorld();
+    const [a, b] = addSlots(w, [{}, {}]) as [string, string];
+    dirty(w, a);
+    dirty(w, b);
+    w.git.failures.set("resetHardAndClean", new BonsaiError("reset boom"));
+    const outcome = await prunePool(w.deps, { force: true });
+    expect(outcome?.preserveFailure).toEqual({ path: a, error: "reset boom" });
+    expect(outcome?.pruned.map((p) => p.path)).toEqual([b]);
+    expect(w.fs.paths.has(a)).toBe(true);
+    expect(w.git.count("worktreePrune")).toBe(1);
+  });
+
+  it("never sanitizes a stale slot and treats duplicate paths once", async () => {
+    const w = makeWorld();
+    const [a, b] = addSlots(w, [{}, {}]) as [string, string];
+    w.fs.paths.delete(a);
+    dirty(w, b);
+    const outcome = await prunePool(w.deps, { paths: [a, a, b], force: true });
+    expect(outcome?.preserved?.path).toBe(b);
+    expect(outcome?.pruned.map((p) => p.path)).toEqual([a]);
+  });
+});
+
 describe("getInfo", () => {
   const logs = {
     dir: () => "/home/me/.local/state/bonsai/logs" as string | undefined,

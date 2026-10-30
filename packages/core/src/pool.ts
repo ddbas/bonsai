@@ -515,22 +515,92 @@ export async function unlockSlot(
 
 // ── prune ──────────────────────────────────────────────────────────────────
 
+export interface PruneOptions {
+  /** Narrow the candidate slots; empty/undefined means every pool slot. */
+  paths?: string[];
+  /** Make `in use` candidates eligible (never `locked` ones). */
+  force?: boolean;
+}
+
 /**
- * Prune available slots, always keeping the pool warm: preserve exactly one
- * (the first in pool order, detaching its branch if it has one), delete the
- * other available slots' directories, then run `git worktree prune` once.
+ * Validate explicit prune targets and return the candidate entries (in pool
+ * order). Throws one aggregated error, before anything is touched.
+ */
+async function resolvePruneTargets(
+  deps: Deps,
+  all: WorktreeListEntry[],
+  paths: string[],
+  force: boolean,
+): Promise<WorktreeListEntry[]> {
+  const canon = new Map<string, WorktreeListEntry>();
+  for (const e of all) canon.set(await canonicalOr(deps, e.path), e);
+
+  const targeted = new Set<WorktreeListEntry>();
+  const errors: string[] = [];
+  for (const raw of paths) {
+    const abs = path.resolve(deps.env.cwd(), raw);
+    const entry = canon.get(await canonicalOr(deps, abs));
+    if (entry === undefined) {
+      errors.push(`${raw} is not a bonsai-managed pool slot`);
+    } else if (entry.status === "locked") {
+      errors.push(
+        `${raw} is locked; unlock it first (\`bs unlock\`) before pruning`,
+      );
+    } else if (entry.status === "in use" && !force) {
+      errors.push(`${raw} is in use; pass --force to prune it`);
+    } else {
+      targeted.add(entry);
+    }
+  }
+  if (errors.length > 0) throw new BonsaiError(errors.join("\n"));
+  return all.filter((e) => targeted.has(e));
+}
+
+/**
+ * Prune the pool: bring eligible slots to `available`, keep exactly one
+ * available slot (detached / sanitized as needed), delete the other eligible
+ * slots' directories, then run `git worktree prune` once. `locked` slots are
+ * never touched.
  *
  * Returns `undefined` when the pool directory does not exist. Individual
- * deletion/detach failures are captured in the outcome, not thrown.
+ * deletion/detach failures are captured in the outcome, not thrown; invalid
+ * targets throw before anything is changed.
  */
-export async function prunePool(deps: Deps): Promise<PruneOutcome | undefined> {
+export async function prunePool(
+  deps: Deps,
+  options: PruneOptions = {},
+): Promise<PruneOutcome | undefined> {
+  const force = options.force ?? false;
+  const paths = options.paths ?? [];
   const poolDir = await poolDirFor(deps);
   if (!(await deps.fs.exists(poolDir))) return undefined;
 
-  const available = (await listWorktreesStatus(deps, poolDir)).filter(
-    (e) => e.status === "available",
+  const all = await listWorktreesStatus(deps, poolDir);
+  const targeted = paths.length > 0;
+  const candidates = targeted
+    ? await resolvePruneTargets(deps, all, paths, force)
+    : all.filter((e) => e.status !== "locked");
+  const isCandidate = new Set(candidates);
+  const eligible = candidates.filter(
+    (e) => e.status === "available" || (force && e.status === "in use"),
   );
-  const [preserved, ...toDelete] = available;
+
+  // Preserved slot: untargeted available > available candidate > forced
+  // in-use candidate (only one that exists on disk).
+  let preserved: WorktreeListEntry | undefined = all.find(
+    (e) => e.status === "available" && !isCandidate.has(e),
+  );
+  const untouched = preserved !== undefined;
+  preserved ??= eligible.find((e) => e.status === "available");
+  if (preserved === undefined && force) {
+    for (const e of eligible) {
+      if (await deps.fs.exists(e.path)) {
+        preserved = e;
+        break;
+      }
+    }
+  }
+  const toDelete = eligible.filter((e) => e !== preserved);
 
   const outcome: PruneOutcome = {
     pruned: [],
@@ -541,10 +611,12 @@ export async function prunePool(deps: Deps): Promise<PruneOutcome | undefined> {
 
   if (preserved !== undefined) {
     const slot: PrunedSlot = { path: preserved.path, branch: preserved.branch };
-    if (preserved.branch === undefined) {
+    const needsSanitize = !untouched && preserved.status === "in use";
+    if (untouched || (preserved.branch === undefined && !needsSanitize)) {
       outcome.preserved = slot;
     } else {
       try {
+        if (needsSanitize) await deps.git.resetHardAndClean(preserved.path);
         const headSha = await deps.git.resolveHead();
         await resetSlot(deps, preserved.path, headSha, undefined);
         outcome.preserved = slot;

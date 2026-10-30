@@ -368,12 +368,20 @@ Reports the slot's overall classification (\`available\` / \`in use\` / \`locked
   program
     .command("prune")
     .description(
-      "Reclaim disk space by deleting unused (`available`) bonsai pool slots for the current repository, then running `git worktree prune`.\n\nClassifies every managed pool slot using the same `available` / `in use` / `locked` rules as `bs list`/`bs status`. Among slots classified `available`, exactly one is always preserved (kept on disk and registered) to keep the pool warm — detaching its branch first if it had one checked out — and the rest have their on-disk directories deleted; `locked` and `in use` slots are never touched. After deleting, `git worktree prune` is run exactly once so git deregisters the removed slots — `bs prune` never edits git's worktree bookkeeping directly. Prints the tilde-abbreviated path (and branch, if any) of each pruned slot. Exits 0 unless a slot's directory failed to delete or the preserved slot failed to detach.",
+      "Reclaim disk space by deleting unused (`available`) bonsai pool slots for the current repository, then running `git worktree prune`.\n\nClassifies every managed pool slot using the same `available` / `in use` / `locked` rules as `bs list`/`bs status`. Among slots classified `available`, exactly one is always preserved (kept on disk and registered) to keep the pool warm — detaching its branch first if it had one checked out — and the rest have their on-disk directories deleted; `locked` and `in use` slots are never touched.\n\nOptional PATH arguments narrow which slots are pruned (invalid, locked, or — without --force — in-use targets abort the run before anything changes). With --force, `in use` slots are pruned too (uncommitted and untracked work is discarded; branches are never deleted); if one must be preserved it is reset, cleaned and detached so it is `available`. `locked` slots are never pruned or modified, even with --force; unlock them first. After deleting, `git worktree prune` is run exactly once so git deregisters the removed slots — `bs prune` never edits git's worktree bookkeeping directly. Prints the tilde-abbreviated path (and branch, if any) of each pruned slot. Exits 0 unless a slot's directory failed to delete or the preserved slot failed to detach.",
+    )
+    .argument("[paths...]", "only prune the slots at these paths")
+    .option(
+      "--force",
+      "also prune `in use` slots (discarding uncommitted work); `locked` slots are never touched",
     )
     .action(
-      action(async () => {
+      action(async (paths: string[], opts: { force?: boolean }) => {
         const { deps } = rt();
-        const outcome = await prunePool(deps);
+        const outcome = await prunePool(deps, {
+          paths,
+          force: opts.force === true,
+        });
         if (outcome === undefined) {
           println(
             "No worktrees managed for this repository (pool does not exist yet).",
@@ -410,7 +418,7 @@ Reports the slot's overall classification (\`available\` / \`in use\` / \`locked
         if (outcome.preserveFailure !== undefined) {
           failureCount++;
           io.err(
-            `error: failed to detach preserved slot ${tilde(deps, outcome.preserveFailure.path)}: ${outcome.preserveFailure.error}\n`,
+            `error: failed to detach or clean preserved slot ${tilde(deps, outcome.preserveFailure.path)}: ${outcome.preserveFailure.error}\n`,
           );
         }
 

@@ -326,3 +326,68 @@ it.skipIf(process.getuid?.() === 0)(
     ).toBe(true);
   },
 );
+
+/** Force with no paths: locked slot untouched, dirty preserved slot sanitized, branch survives. */
+it("prune --force sanitizes the preserved slot and keeps branches", async () => {
+  const env = await GitEnv.create();
+
+  const lockedSlot = env.runGet();
+  writeFileSync(join(lockedSlot, "keep.txt"), "mine");
+  lock(env, lockedSlot);
+
+  await env.git("branch", "my-feature");
+  const slot = env.runGetBranch("my-feature");
+  writeFileSync(join(slot, "dirty.txt"), "dirty");
+  expect(env.statusWord(slot)).toBe("in use");
+
+  const out = env.bs(["prune", "--force"]);
+  expectOk(out, "bs prune --force");
+
+  expect(existsSync(slot), "preserved slot stays on disk").toBe(true);
+  expect(existsSync(join(slot, "dirty.txt"))).toBe(false);
+  expect(env.statusWord(slot)).toBe("available");
+  expect(existsSync(join(lockedSlot, "keep.txt"))).toBe(true);
+  expect(
+    hostGit(env.repoPath, ["branch", "--list", "my-feature"]).stdout,
+  ).toContain("my-feature");
+});
+
+/** Locked targets are refused with or without --force; unlock makes them prunable. */
+it("prune refuses locked paths until unlocked", async () => {
+  const env = await GitEnv.create();
+  const slot = env.runGet();
+  lock(env, slot);
+
+  for (const args of [
+    ["prune", slot],
+    ["prune", "--force", slot],
+  ]) {
+    const out = env.bs(args);
+    expect(out.status).not.toBe(0);
+    expect(out.stderr).toContain("unlock");
+    expect(existsSync(slot)).toBe(true);
+  }
+
+  unlock(env, slot);
+  expectOk(env.bs(["prune", "--force", slot]), "bs prune --force after unlock");
+  expect(existsSync(slot)).toBe(true); // lone slot is preserved
+});
+
+/** An in-use path requires --force; with an available sibling it is deleted. */
+it("prune in-use path needs --force", async () => {
+  const env = await GitEnv.create();
+  const busy = env.runGet();
+  writeFileSync(join(busy, "dirty.txt"), "dirty");
+  lock(env, busy);
+  const free = env.runGet();
+  unlock(env, busy);
+
+  const refused = env.bs(["prune", busy]);
+  expect(refused.status).not.toBe(0);
+  expect(refused.stderr).toContain("--force");
+  expect(existsSync(busy)).toBe(true);
+
+  expectOk(env.bs(["prune", "--force", busy]), "bs prune --force <path>");
+  expect(existsSync(busy)).toBe(false);
+  expect(existsSync(free)).toBe(true);
+});
