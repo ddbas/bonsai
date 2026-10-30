@@ -5,13 +5,6 @@ post-checkout:
       run: mise exec -- codegraph init
 pre-commit:
   jobs:
-    - name: lint
-      run: mise run lint:fix
+    - name: verify
+      run: mise run verify:fix
       stage_fixed: true
-    - name: build
-      run: mise run build
-    - name: test
-      run: mise run test
-    - name: openspec
-      glob: "openspec/**"
-      run: mise exec -- openspec validate --all --no-interactive

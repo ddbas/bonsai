@@ -11,7 +11,6 @@ enter = "mise exec -- lefthook install"
 lefthook = "latest"
 "github:rtk-ai/rtk" = "latest"
 "npm:@colbymchenry/codegraph" = "latest"
-"npm:@fission-ai/openspec" = "latest"
 pnpm = "12.16.1"
 
 [tasks.build]
@@ -23,9 +22,9 @@ description = "Install all dependencies"
 usage = 'flag "--frozen-lockfile" help="Fail if the lockfile needs updating"'
 run = "mise exec -- pnpm install ${usage_frozen_lockfile:+--frozen-lockfile}"
 
-[tasks.test]
-description = "Run all tests"
-run = "mise exec -- pnpm run test"
+[tasks.install]
+description = "Build and symlink bonsai into the local bin dir"
+run = "mise exec -- pnpm run install:local"
 
 [tasks.lint]
 description = "Lint all packages"
@@ -35,12 +34,22 @@ run = "mise exec -- pnpm run lint"
 description = "Lint all packages"
 run = "mise exec -- pnpm run lint:fix"
 
-[tasks.ci]
-description = "Run build, test and lint"
-depends = ["deps"]
-run = "mise exec -- pnpm run ci"
+[tasks."openspec:list"]
+description = "List all OpenSpec proposals"
+run = "mise exec -- pnpm run openspec:list"
 
-[tasks.install]
-description = "Build and symlink bonsai into the local bin dir"
-run = "mise exec -- pnpm run install:local"
+[tasks."openspec:validate"]
+description = "Validate all OpenSpec files"
+run = "mise exec -- pnpm run openspec:validate"
 
+[tasks.test]
+description = "Run all tests"
+run = "mise exec -- pnpm run test"
+
+[tasks.verify]
+description = "Run all verifications"
+run = "mise exec -- pnpm run verify"
+
+[tasks."verify:fix"]
+description = "Run all verifications and fix any fixable issues"
+run = "mise exec -- pnpm run verify:fix"

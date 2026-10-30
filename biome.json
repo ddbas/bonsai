@@ -9,16 +9,14 @@
     "ignoreUnknown": false,
     "includes": [
       "**",
-      "!.agents",
-      "!.claude",
-      "!.pi",
-      "!.opencode",
-      "!.codegraph",
-      "!.lavish",
-      "!.mise",
-      "!openspec",
       "!**/dist",
-      "!**/node_modules"
+      "!**/node_modules",
+      "!crates",
+      "!target",
+      "!openspec",
+      "!.*",
+      "!**/fixtures",
+      "!**/assets"
     ]
   },
   "formatter": {

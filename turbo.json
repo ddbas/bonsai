@@ -11,18 +11,16 @@
       "dependsOn": ["build"],
       "passThroughEnv": ["BS_BIN", "DOCKER_HOST", "TESTCONTAINERS_*"]
     },
-    "//#lint": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "!.agents/**",
-        "!.claude/**",
-        "!.pi/**",
-        "!.opencode/**",
-        "!.codegraph/**",
-        "!.lavish/**",
-        "!.mise/**",
-        "!openspec/**"
-      ]
+    "//#lint": {},
+    "//#lint:fix": {},
+    "openspec:validate": {
+      "inputs": ["openspec/**"]
+    },
+    "verify": {
+      "dependsOn": ["build", "//#lint", "openspec:validate", "test"]
+    },
+    "verify:fix": {
+      "dependsOn": ["build", "//#lint:fix", "openspec:validate", "test"]
     }
   }
 }
