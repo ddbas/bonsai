@@ -21,20 +21,19 @@ run = "mise exec -- pnpm run build"
 [tasks.deps]
 description = "Install all dependencies"
 usage = 'flag "--frozen-lockfile" help="Fail if the lockfile needs updating"'
-run = "pnpm install ${usage_frozen_lockfile:+--frozen-lockfile}"
+run = "mise exec -- pnpm install ${usage_frozen_lockfile:+--frozen-lockfile}"
 
 [tasks.test]
-description = "Run all tests (builds first)"
-depends = ["deps"]
-run = "pnpm exec turbo run test"
+description = "Run all tests"
+run = "mise exec -- pnpm run test"
 
 [tasks.lint]
 description = "Lint all packages"
-run = "pnpm run lint"
+run = "mise exec -- pnpm run lint"
 
 [tasks."lint:fix"]
 description = "Lint all packages"
-run = "pnpm run lint:fix"
+run = "mise exec -- pnpm run lint:fix"
 
 [tasks.ci]
 description = "Run build, test and lint"
@@ -43,5 +42,5 @@ run = "mise exec -- pnpm run ci"
 
 [tasks.install]
 description = "Build and symlink bonsai into the local bin dir"
-run = "pnpm run install:local"
+run = "mise exec -- pnpm run install:local"
 
