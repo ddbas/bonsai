@@ -44,7 +44,7 @@
       in core fails lint, then revert
 - [x] 2.4 Define port interfaces (`Git`, `Tmux`, `Logger`, clock/fs as needed)
       in `packages/core/src/ports.ts`; verify typecheck passes
-- [ ] 2.5 Ask the user for permission to create root and per-package `AGENTS.md`
+- [x] 2.5 Ask the user for permission to create root and per-package `AGENTS.md`
       (mirroring agentctl); create them only if approved
 
 ## 3. E2E test infrastructure and oracle
