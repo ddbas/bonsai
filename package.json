@@ -5,7 +5,7 @@
   "packageManager": "pnpm@12.16.1",
   "scripts": {
     "build": "turbo run build",
-    "ci": "turbo run ci",
+    "ci": "turbo run build test //#lint",
     "install:local": "mkdir -p \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}\" && rm -f \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}/bs\" && install -m 755 \"$PWD/apps/bonsai/dist/cli.cjs\" \"${BONSAI_INSTALL_DIR:-$HOME/.local/bin}/bs\"",
     "lint": "biome check .",
     "lint:fix": "biome check . --write --no-errors-on-unmatched",

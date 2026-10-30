@@ -1,11 +1,11 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "agentGuidance": false,
+  "globalDependencies": ["tsconfig.base.json"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "inputs": ["src/**", "rspack.config.*", "package.json", "tsconfig.json"],
-      "outputs": ["dist/**"]
+      "outputs": []
     },
     "test": {
       "dependsOn": ["build"],
@@ -13,12 +13,6 @@
     },
     "//#lint": {
       "inputs": ["**/*.{ts,json,md}", "biome.json", "!openspec/**"]
-    },
-    "//#format:biome": {
-      "inputs": ["**/*.{ts,json,md}", "biome.json", "!openspec/**"]
-    },
-    "ci": {
-      "dependsOn": ["build", "test", "//#lint"]
     }
   }
 }
