@@ -12,7 +12,17 @@
       "passThroughEnv": ["BS_BIN", "DOCKER_HOST", "TESTCONTAINERS_*"]
     },
     "//#lint": {
-      "inputs": ["**/*.{ts,json,md}", "biome.json", "!openspec/**"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!.agents/**",
+        "!.claude/**",
+        "!.pi/**",
+        "!.opencode/**",
+        "!.codegraph/**",
+        "!.lavish/**",
+        "!.mise/**",
+        "!openspec/**"
+      ]
     }
   }
 }
