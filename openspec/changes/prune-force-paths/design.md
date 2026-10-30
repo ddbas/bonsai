@@ -8,6 +8,11 @@ Classification is `locked` > `in use` > `available` (`classify.ts`). A slot is
 files, and its branch state shows nothing unmerged (detached at, or branch
 merged into, the default ref). Git-ignored files are not considered.
 
+Prune model: (1) normalize — eligible slots become `available`; (2) reduce —
+keep exactly one available slot, delete the rest. Deletion is only the reduce
+step. Implementation shortcut: slots slated for deletion are not cleaned first
+(same observable result); only the preserved slot is actually sanitized.
+
 ## Goals / Non-Goals
 
 **Goals:**

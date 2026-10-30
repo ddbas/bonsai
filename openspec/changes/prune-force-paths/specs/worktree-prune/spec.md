@@ -1,5 +1,34 @@
 ## MODIFIED Requirements
 
+### Requirement: `prune` subcommand exists
+
+The CLI SHALL expose a `prune` subcommand (`bs prune`) that cleans up the
+current repository's bonsai pool so disk space is reclaimed. Pruning is about
+cleaning up, not about deleting for its own sake: it SHALL (1) bring every
+eligible slot to the `available` state, and (2) eliminate the extra `available`
+slots so that exactly one `available` slot remains (never zero, never more than
+one, among the slots it was allowed to touch), then delegate deregistration to
+`git worktree prune`. A slot's directory is deleted only as the means of
+eliminating an extra available slot. Eligible slots are those classified
+`available`, plus (with `--force`) those classified `in use`; `locked` slots are
+never eligible. Because deleting a slot makes cleaning it first pointless, an
+implementation MAY delete an extra `in use` slot directly instead of cleaning it
+before deleting it; the observable outcome is the same.
+
+#### Scenario: Invoke with `prune`
+
+- **WHEN** the user runs `bs prune`
+- **THEN** the process exits with code 0 (assuming no errors) and prints a
+  summary of what was pruned to stdout
+
+#### Scenario: Pool ends with exactly one available slot
+
+- **WHEN** the user runs `bs prune` against a pool containing at least one
+  `available` slot
+- **THEN** afterwards exactly one `available` slot remains among the slots
+  `bs prune` was allowed to touch, and all the other available slots have been
+  removed to reclaim disk space
+
 ### Requirement: Only slots classified `available` are deleted
 
 `bs prune` SHALL classify every managed pool slot for the current repository

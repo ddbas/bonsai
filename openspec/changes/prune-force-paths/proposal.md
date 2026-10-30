@@ -7,6 +7,10 @@ without weakening the guarantee that `locked` slots are never touched.
 
 ## What Changes
 
+- **Definition of pruning (made explicit in the spec):** pruning is cleaning
+  up, not merely deleting. It brings eligible worktrees to `available`, then
+  eliminates the extra available ones so exactly one remains (never zero, never
+  many) to reclaim disk space.
 - `bs prune` accepts zero or more optional worktree path arguments that narrow
   which slots are candidates for pruning. With no paths, every pool slot is a
   candidate (today's behavior).
