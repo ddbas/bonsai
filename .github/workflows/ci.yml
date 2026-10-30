@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   ci:
-    name: Build, typecheck, test, lint
+    name: Build, test, lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

@@ -20,8 +20,7 @@
     "testcontainers": "12.2.0"
   },
   "scripts": {
-    "build": "rspack build",
-    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && rspack build",
     "test": "vitest run"
   }
 }

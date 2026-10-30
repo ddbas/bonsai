@@ -1,12 +1,10 @@
 #:schema https://mise.jdx.dev/schema/mise.json
 
 [settings]
-experimental = true
 lockfile = true
-idiomatic_version_file_enable_tools = ["node"]
 
 [hooks]
-enter = "lefthook install"
+enter = "mise exec -- lefthook install"
 
 [tools]
 lefthook = "latest"
@@ -15,21 +13,13 @@ lefthook = "latest"
 "npm:@fission-ai/openspec" = "latest"
 pnpm = "12.16.1"
 
-[tasks.deps]
-description = "Install dependencies (frozen lockfile in CI)"
-run = "pnpm install"
-sources = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "apps/*/package.json", "packages/*/package.json"]
-outputs = ["node_modules/.modules.yaml"]
-
 [tasks.build]
 description = "Build all packages"
-depends = ["deps"]
-run = "pnpm exec turbo run build"
+run = "mise exec -- pnpm run build"
 
-[tasks.typecheck]
-description = "Typecheck all packages"
-depends = ["deps"]
-run = "pnpm exec turbo run typecheck"
+[tasks.deps]
+description = "Install dependencies"
+run = "pnpm install"
 
 [tasks.test]
 description = "Run all tests (builds first)"
@@ -37,35 +27,19 @@ depends = ["deps"]
 run = "pnpm exec turbo run test"
 
 [tasks.lint]
-description = "Lint and format-check with Biome"
-depends = ["deps"]
-run = "pnpm exec turbo run //#lint"
+description = "Lint all packages"
+run = "pnpm run lint"
 
-[tasks.format]
-description = "Format with Biome (applies fixes); optionally pass files"
-depends = ["deps"]
-run = "pnpm exec turbo run //#format:biome --"
+[tasks."lint:fix"]
+description = "Lint all packages"
+run = "pnpm run lint:fix"
 
 [tasks.ci]
-description = "Run build, typecheck, test and lint"
+description = "Run build, test and lint"
 depends = ["deps"]
-run = "pnpm exec turbo run ci"
+run = "mise exec -- pnpm run ci"
 
 [tasks.install]
-description = "Build and install bs into ~/.local/bin (or $BONSAI_INSTALL_DIR)"
-depends = ["deps"]
-run = """
-pnpm exec turbo run build --filter=bonsai
-dir="${BONSAI_INSTALL_DIR:-$HOME/.local/bin}"
-mkdir -p "$dir"
-rm -f "$dir/bs"
-install -m 755 "$PWD/apps/bonsai/dist/cli.cjs" "$dir/bs"
-"""
+description = "Build and symlink bonsai into the local bin dir"
+run = "pnpm run install:local"
 
-[tasks."openspec:open"]
-description = "Render an OpenSpec proposal to HTML and open it in the browser"
-usage = '''
-arg "<change-id>" help="OpenSpec change ID to preview (e.g. my-feature)"
-complete "change-id" run="openspec list --json | jq -r '.changes[].name'"
-'''
-run = "scripts/view-proposal.sh ${usage_change_id?}"

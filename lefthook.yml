@@ -5,13 +5,13 @@ post-checkout:
       run: mise exec -- codegraph init
 pre-commit:
   jobs:
-    - name: format
-      glob: "*.{ts,cjs,mjs,json,jsonc,md}"
-      run: mise run format {staged_files}
+    - name: lint
+      run: mise run lint:fix
       stage_fixed: true
-    # turbo orders build -> typecheck/test/lint so each runs once
-    - name: verify
-      run: mise run ci
-    - name: openspec-validate
-      run: bash scripts/openspec-validate-staged.sh {staged_files}
+    - name: build
+      run: mise run build
+    - name: test
+      run: mise run test
+    - name: openspec
       glob: "openspec/**"
+      run: mise exec -- openspec validate --all --no-interactive

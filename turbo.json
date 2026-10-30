@@ -7,9 +7,6 @@
       "inputs": ["src/**", "rspack.config.*", "package.json", "tsconfig.json"],
       "outputs": ["dist/**"]
     },
-    "typecheck": {
-      "dependsOn": ["^typecheck"]
-    },
     "test": {
       "dependsOn": ["build"],
       "passThroughEnv": ["BS_BIN", "DOCKER_HOST", "TESTCONTAINERS_*"]
@@ -21,7 +18,7 @@
       "inputs": ["**/*.{ts,json,md}", "biome.json", "!openspec/**"]
     },
     "ci": {
-      "dependsOn": ["build", "typecheck", "test", "//#lint"]
+      "dependsOn": ["build", "test", "//#lint"]
     }
   }
 }

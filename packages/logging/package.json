@@ -11,7 +11,7 @@
     "pino": "10.4.0"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   }
 }
