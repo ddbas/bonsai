@@ -28,6 +28,11 @@ export interface Git {
     headSha: string,
     branch: BranchMode | undefined,
   ): Promise<void>;
+  /**
+   * Discard all uncommitted changes (`git reset --hard`) and remove untracked
+   * files and directories (`git clean -fd`, never `-x`) in `slot`.
+   */
+  resetHardAndClean(slot: string): Promise<void>;
   /** Create a new slot at `slot`, optionally on a branch. */
   worktreeAdd(
     slot: string,

@@ -40,6 +40,7 @@ function harness(entries: WorktreeEntry[] = []) {
         existing.add(slot);
       },
       checkout: async () => {},
+      resetHardAndClean: async () => {},
       worktreeLock: async () => {},
       worktreeUnlock: async () => {},
       resolveHead: async () => "abc",
@@ -278,6 +279,21 @@ describe("prune / info / help / logging", () => {
     expect(h.stdout()).toBe(
       "\u{1f5d1}\u{fe0f}  pruned /pool/repo/two  (old)\n",
     );
+  });
+
+  it("prune with a locked path fails and names the unlock", async () => {
+    const h = harness([slot("one", { locked: true }), slot("two")]);
+    const r = await h.run("prune", "--force", "/pool/repo/one");
+    expect(r.code).toBe(1);
+    expect(h.stderr()).toContain("locked");
+    expect(h.stderr()).toContain("unlock");
+  });
+
+  it("prune by path of an available slot prunes only it", async () => {
+    const h = harness([slot("one"), slot("two")]);
+    const r = await h.run("prune", "/pool/repo/two");
+    expect(r.code).toBe(0);
+    expect(h.stdout()).toBe("\u{1f5d1}\u{fe0f}  pruned /pool/repo/two\n");
   });
 
   it("info prints key: value lines with tilde-abbreviated paths", async () => {

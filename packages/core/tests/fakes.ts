@@ -106,6 +106,9 @@ export class FakeGit implements Git {
       `checkout ${slot} ${head} ${b ? `${b.kind}:${b.name}` : "-"}`,
     );
   }
+  async resetHardAndClean(slot: string) {
+    await this.tick(`resetHardAndClean ${slot}`);
+  }
   async worktreeAdd(slot: string, head: string, b: BranchMode | undefined) {
     await this.tick(
       `worktreeAdd ${slot} ${head} ${b ? `${b.kind}:${b.name}` : "-"}`,
